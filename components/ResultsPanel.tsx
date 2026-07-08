@@ -18,15 +18,17 @@ export default function ResultsPanel({
     (i) => states[i.id]?.status === "success"
   ).length;
 
-  // Exactly "filename - asset_id", one per line, successes only.
-  const output = useMemo(
-    () =>
-      items
+  // Tab-separated "Filename\tAsset ID" rows (with header), successes only —
+  // pastes directly into spreadsheet columns.
+  const output = useMemo(() => {
+    if (successCount === 0) return "";
+    return [
+      "Filename\tAsset ID",
+      ...items
         .filter((i) => states[i.id]?.status === "success")
-        .map((i) => `${i.name} - ${states[i.id].assetId}`)
-        .join("\n"),
-    [items, states]
-  );
+        .map((i) => `${i.name}\t${states[i.id].assetId}`),
+    ].join("\n");
+  }, [items, states, successCount]);
 
   const copyAll = async () => {
     try {
@@ -96,7 +98,7 @@ export default function ResultsPanel({
           value={output}
           rows={Math.min(Math.max(successCount, 3), 12)}
           className="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-sm text-slate-800 focus:outline-none"
-          placeholder="Successful uploads will appear here as: filename - asset_id"
+          placeholder={"Successful uploads will appear here as tab-separated rows:\nFilename\tAsset ID"}
         />
       </div>
     </section>
