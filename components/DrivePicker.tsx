@@ -13,7 +13,6 @@ declare global {
 }
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-const PICKER_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_PICKER_API_KEY;
 const APP_ID = process.env.NEXT_PUBLIC_GOOGLE_APP_ID;
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -50,11 +49,13 @@ export default function DrivePicker({
         .setSelectFolderEnabled(false)
         .setMimeTypes(ACCEPTED_MIME_TYPES.join(","));
 
+      // No developer key: it's only used for quota tracking on unauthenticated
+      // views (e.g. public search) — this DocsView is fully OAuth-scoped via
+      // setOAuthToken(), and doesn't need one. See CLAUDE.md before re-adding.
       const picker = new google.picker.PickerBuilder()
         .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
         .setAppId(APP_ID)
         .setOAuthToken(accessToken)
-        .setDeveloperKey(PICKER_API_KEY)
         .addView(view)
         .setCallback((data: any) => {
           if (data.action === google.picker.Action.PICKED) {
@@ -81,9 +82,9 @@ export default function DrivePicker({
       signIn("google", { callbackUrl: "/" });
       return;
     }
-    if (!CLIENT_ID || !PICKER_API_KEY || !APP_ID) {
+    if (!CLIENT_ID || !APP_ID) {
       setError(
-        "Google Picker is not configured. Set NEXT_PUBLIC_GOOGLE_CLIENT_ID, NEXT_PUBLIC_GOOGLE_PICKER_API_KEY and NEXT_PUBLIC_GOOGLE_APP_ID."
+        "Google Picker is not configured. Set NEXT_PUBLIC_GOOGLE_CLIENT_ID and NEXT_PUBLIC_GOOGLE_APP_ID."
       );
       return;
     }

@@ -42,6 +42,14 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
   token unless `jwt()` explicitly recovers it, which it does by decoding the
   current session cookie via `next-auth/jwt`'s `decode()` before applying the
   provider that was just used. Don't "simplify" this away.
+- **Google Picker developer key:** `components/DrivePicker.tsx` never calls
+  `setDeveloperKey()` — `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY` isn't used at all.
+  A developer key is only needed for quota tracking on unauthenticated Picker
+  views (e.g. public search); the `DocsView` here is fully OAuth-scoped via
+  `setOAuthToken()`, so it doesn't need one — and a misconfigured key actively
+  breaks the picker (`The API developer key is invalid`). Don't re-add it
+  without confirming the key is correctly scoped to the same GCP project as
+  `GOOGLE_CLIENT_ID`/`NEXT_PUBLIC_GOOGLE_APP_ID` first.
 - **Tokens never reach the browser.** The `session` callback exposes only display
   fields + `hasFacebook`/`hasGoogle` booleans. The one exception is the Google
   Picker, which mints a short-lived `drive.readonly` token client-side *only* to
