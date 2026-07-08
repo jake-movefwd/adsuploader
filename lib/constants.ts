@@ -18,8 +18,12 @@ export function isVideoMime(mime: string): boolean {
   return mime.startsWith("video/");
 }
 
-/** Chunk size for Meta's resumable video upload protocol (10 MB). */
-export const VIDEO_CHUNK_SIZE = 10 * 1024 * 1024;
+/**
+ * Chunk size for Meta's resumable video upload protocol. Kept under Vercel's
+ * 4.5MB hard request-body limit for serverless Functions (with headroom for
+ * multipart overhead) — larger chunks 413 before the route handler even runs.
+ */
+export const VIDEO_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /** Max simultaneous uploads (avoid Meta rate limiting). */
 export const MAX_CONCURRENT_UPLOADS = 3;

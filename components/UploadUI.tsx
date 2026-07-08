@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import { upload } from "@vercel/blob/client";
 import AccountSelector from "./AccountSelector";
 import SourceToggle, { type UploadSource } from "./SourceToggle";
 import DropZone from "./DropZone";
@@ -77,13 +78,27 @@ export default function UploadUI() {
 
   const uploadImage = useCallback(
     async (item: SelectedItem, acct: string) => {
-      update(item.id, { status: "uploading", progress: 0.5 });
+      update(item.id, { status: "uploading", progress: 0 });
       let res: Response;
       if (item.source === "local") {
-        const form = new FormData();
-        form.append("accountId", acct);
-        form.append("file", (item as LocalItem).file);
-        res = await fetch("/api/meta/image", { method: "POST", body: form });
+        const file = (item as LocalItem).file;
+        const blob = await upload(file.name, file, {
+          access: "public",
+          handleUploadUrl: "/api/blob/upload",
+          onUploadProgress: ({ percentage }) => {
+            update(item.id, { progress: (percentage / 100) * 0.9 });
+          },
+        });
+        update(item.id, { progress: 0.9 });
+        res = await fetch("/api/meta/image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accountId: acct,
+            blobUrl: blob.url,
+            filename: file.name,
+          }),
+        });
       } else {
         res = await fetch("/api/meta/image", {
           method: "POST",

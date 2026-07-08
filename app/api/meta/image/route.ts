@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { del } from "@vercel/blob";
 import { uploadImage, MetaApiError } from "@/lib/meta";
 import {
   downloadDriveFile,
@@ -19,14 +20,20 @@ export const runtime = "nodejs";
 /**
  * POST /api/meta/image
  *
- * Two request shapes:
- *   - Local:  multipart/form-data with `accountId` and `file`.
+ * Three request shapes:
+ *   - Local:  application/json { accountId, blobUrl, filename } — the browser
+ *             uploaded bytes straight to Vercel Blob (bypassing this Function's
+ *             ~4.5MB body limit); we fetch them back server-to-server, forward
+ *             to Meta, then delete the transient blob.
  *   - Drive:  application/json { accountId, fileId } — the file is downloaded
  *             server-side (bytes never touch the browser) then forwarded to Meta.
+ *   - Legacy local: multipart/form-data with `accountId` and `file`, kept for
+ *             small files that don't go through Blob.
  *
  * Responds with { filename, assetId } where assetId is the Meta image hash.
  */
 export async function POST(req: NextRequest) {
+  let blobUrlToClean: string | null = null;
   try {
     const token = await requireToken(req);
     const fbToken = requireFacebookToken(token);
@@ -37,24 +44,55 @@ export async function POST(req: NextRequest) {
     let blob: Blob;
 
     if (contentType.includes("application/json")) {
-      const { accountId: acct, fileId } = await req.json();
-      if (!acct || !fileId) {
-        return NextResponse.json(
-          { error: "accountId and fileId are required" },
-          { status: 400 }
-        );
+      const payload = await req.json();
+      const { accountId: acct } = payload;
+
+      if (payload.blobUrl) {
+        const { blobUrl, filename: fname } = payload;
+        if (!acct || !blobUrl || !fname) {
+          return NextResponse.json(
+            { error: "accountId, blobUrl and filename are required" },
+            { status: 400 }
+          );
+        }
+        blobUrlToClean = blobUrl;
+        const blobRes = await fetch(blobUrl);
+        if (!blobRes.ok) {
+          return NextResponse.json(
+            { error: "Failed to read uploaded file" },
+            { status: 502 }
+          );
+        }
+        const contentTypeHeader = blobRes.headers.get("content-type") ?? "";
+        if (!isAcceptedMimeType(contentTypeHeader)) {
+          return NextResponse.json(
+            { error: `Unsupported file type: ${contentTypeHeader}` },
+            { status: 400 }
+          );
+        }
+        accountId = acct;
+        filename = fname;
+        blob = await blobRes.blob();
+      } else {
+        const { fileId } = payload;
+        if (!acct || !fileId) {
+          return NextResponse.json(
+            { error: "accountId and fileId are required" },
+            { status: 400 }
+          );
+        }
+        const googleToken = requireGoogleToken(token);
+        const meta = await getDriveFileMeta(googleToken, fileId);
+        if (!isAcceptedMimeType(meta.mimeType)) {
+          return NextResponse.json(
+            { error: `Unsupported file type: ${meta.mimeType}` },
+            { status: 400 }
+          );
+        }
+        accountId = acct;
+        filename = meta.name;
+        blob = await downloadDriveFile(googleToken, fileId);
       }
-      const googleToken = requireGoogleToken(token);
-      const meta = await getDriveFileMeta(googleToken, fileId);
-      if (!isAcceptedMimeType(meta.mimeType)) {
-        return NextResponse.json(
-          { error: `Unsupported file type: ${meta.mimeType}` },
-          { status: 400 }
-        );
-      }
-      accountId = acct;
-      filename = meta.name;
-      blob = await downloadDriveFile(googleToken, fileId);
     } else {
       const form = await req.formData();
       const acct = form.get("accountId");
@@ -89,5 +127,11 @@ export async function POST(req: NextRequest) {
       { error: "Image upload failed" },
       { status: 500 }
     );
+  } finally {
+    if (blobUrlToClean) {
+      await del(blobUrlToClean).catch(() => {
+        // best-effort cleanup; the blob store isn't user-facing storage
+      });
+    }
   }
 }

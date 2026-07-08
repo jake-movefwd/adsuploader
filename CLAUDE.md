@@ -35,7 +35,13 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
   strategy — no database** (nothing persists server-side). Facebook is the primary
   login; Google is linked **on-demand** when the user opens the Drive tab. Provider
   access tokens are stored in the encrypted JWT **keyed by provider**
-  (`token.facebook`, `token.google`) so both coexist.
+  (`token.facebook`, `token.google`) so both coexist. Gotcha: NextAuth v4 rebuilds
+  the `jwt()` callback's `token` param from scratch (just `name`/`email`/`picture`/
+  `sub`) on every OAuth sign-in — it does not decode the existing session cookie
+  first. So linking a second provider would silently drop the first provider's
+  token unless `jwt()` explicitly recovers it, which it does by decoding the
+  current session cookie via `next-auth/jwt`'s `decode()` before applying the
+  provider that was just used. Don't "simplify" this away.
 - **Tokens never reach the browser.** The `session` callback exposes only display
   fields + `hasFacebook`/`hasGoogle` booleans. The one exception is the Google
   Picker, which mints a short-lived `drive.readonly` token client-side *only* to
@@ -54,10 +60,19 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
 
 ## Upload flows (know these before touching upload code)
 
-- **Images** → `POST /api/meta/image`. Local = multipart; Drive = JSON `{fileId}`
-  (downloaded server-side). Returns the image `hash` as the asset id.
-- **Local videos** — client-driven: `start` → loop `transfer` (10MB chunks) →
-  `finish` → poll `status`. Client drives chunks so the progress bar is real; token
+- **Images** → `POST /api/meta/image`. Local files upload straight from the
+  browser to Vercel Blob (`upload()` via `@vercel/blob/client`, token minted by
+  `/api/blob/upload`), then the route is called with JSON `{accountId, blobUrl,
+  filename}` — it fetches the bytes back server-to-server, forwards to Meta, and
+  deletes the blob in a `finally`. This exists because Vercel Functions hard-cap
+  request bodies at ~4.5MB (enforced at the edge, before the function runs) and
+  Meta's image endpoint has no chunked/resumable upload like video does. Drive =
+  JSON `{fileId}` (downloaded server-side, unaffected by the body limit). Legacy
+  multipart `{accountId, file}` is still accepted for callers that don't go
+  through Blob. Returns the image `hash` as the asset id.
+- **Local videos** — client-driven: `start` → loop `transfer` (`VIDEO_CHUNK_SIZE`,
+  currently 4MB — must stay under Vercel's ~4.5MB Function body limit) → `finish`
+  → poll `status`. Client drives chunks so the progress bar is real; token
   stays server-side. asset id = `video_id`.
 - **Drive videos** — server-driven SSE: `GET /api/meta/video/from-drive`. Server
   downloads from Drive and runs the chunk loop, streaming `progress`/`done`/`error`

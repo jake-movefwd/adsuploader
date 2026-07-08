@@ -1,4 +1,7 @@
 import type { NextAuthOptions } from "next-auth";
+import type { JWT } from "next-auth/jwt";
+import { decode } from "next-auth/jwt";
+import { cookies } from "next/headers";
 import FacebookProvider from "next-auth/providers/facebook";
 import GoogleProvider from "next-auth/providers/google";
 
@@ -9,6 +12,28 @@ const GOOGLE_SCOPES = [
   "profile",
   "https://www.googleapis.com/auth/drive.readonly",
 ].join(" ");
+
+/**
+ * NextAuth v4 rebuilds the JWT from scratch (just `name`/`email`/`picture`/`sub`)
+ * on every OAuth sign-in callback — it does NOT decode the existing session
+ * cookie first. That's fine for a fresh login, but it means linking a second
+ * provider (e.g. Google, on top of an existing Facebook session) silently
+ * drops the first provider's token unless we manually recover it here.
+ */
+async function getExistingToken(): Promise<JWT | null> {
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) return null;
+  const store = cookies();
+  const raw =
+    store.get("__Secure-next-auth.session-token")?.value ??
+    store.get("next-auth.session-token")?.value;
+  if (!raw) return null;
+  try {
+    return await decode({ token: raw, secret });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * NextAuth configuration.
@@ -49,10 +74,22 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     /**
      * Runs on sign-in (when `account` is present) and on every subsequent
-     * session read. On sign-in we merge the new provider's token into the
-     * existing token without discarding the other provider's credentials.
+     * session read. NextAuth hands us a fresh `token` (no custom fields) on
+     * every sign-in, so on sign-in we first recover the other provider's
+     * credentials from the still-valid session cookie before applying the
+     * provider that was just used — that's what lets Facebook + Google
+     * coexist after on-demand linking.
      */
     async jwt({ token, account }) {
+      if (account) {
+        const existing = await getExistingToken();
+        if (existing?.facebook && !token.facebook) {
+          token.facebook = existing.facebook;
+        }
+        if (existing?.google && !token.google) {
+          token.google = existing.google;
+        }
+      }
       if (account?.provider === "facebook" && account.access_token) {
         token.facebook = { accessToken: account.access_token };
       }
