@@ -160,16 +160,23 @@ export async function transferVideoChunk(
   };
 }
 
-/** Finish phase: commits the upload session. */
+/**
+ * Finish phase: commits the upload session. `title` sets the video's display
+ * name in the Meta Ads media library (otherwise it shows as "Untitled").
+ */
 export async function finishVideoUpload(
   accountId: string,
   token: string,
-  uploadSessionId: string
+  uploadSessionId: string,
+  title?: string
 ): Promise<void> {
   const form = new FormData();
   form.append("access_token", token);
   form.append("upload_phase", "finish");
   form.append("upload_session_id", uploadSessionId);
+  if (title) {
+    form.append("title", title);
+  }
 
   const res = await fetch(`${GRAPH_VIDEO_BASE}/${accountId}/advideos`, {
     method: "POST",

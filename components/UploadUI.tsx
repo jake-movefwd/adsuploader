@@ -152,7 +152,11 @@ export default function UploadUI() {
       const finishRes = await fetch("/api/meta/video/finish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: acct, uploadSessionId }),
+        body: JSON.stringify({
+          accountId: acct,
+          uploadSessionId,
+          filename: item.file.name,
+        }),
       });
       if (!finishRes.ok) throw new Error(await readError(finishRes));
 

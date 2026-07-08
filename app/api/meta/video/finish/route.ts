@@ -11,14 +11,14 @@ export const runtime = "nodejs";
 
 /**
  * POST /api/meta/video/finish
- * body: { accountId, uploadSessionId }
+ * body: { accountId, uploadSessionId, filename? }
  */
 export async function POST(req: NextRequest) {
   try {
     const token = await requireToken(req);
     const fbToken = requireFacebookToken(token);
 
-    const { accountId, uploadSessionId } = await req.json();
+    const { accountId, uploadSessionId, filename } = await req.json();
     if (!accountId || !uploadSessionId) {
       return NextResponse.json(
         { error: "accountId and uploadSessionId are required" },
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await finishVideoUpload(accountId, fbToken, uploadSessionId);
+    await finishVideoUpload(accountId, fbToken, uploadSessionId, filename);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof UnauthorizedError) return unauthorizedResponse(err.message);

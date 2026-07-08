@@ -90,7 +90,7 @@ export async function GET(req: NextRequest) {
         }
 
         // Finish phase
-        await finishVideoUpload(accountId, fbToken, uploadSessionId);
+        await finishVideoUpload(accountId, fbToken, uploadSessionId, meta.name);
 
         // Poll processing status
         // eslint-disable-next-line no-constant-condition
