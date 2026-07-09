@@ -61,16 +61,23 @@ export async function fetchAdAccounts(token: string): Promise<AdAccount[]> {
   return accounts;
 }
 
+export interface UploadImageResult {
+  /** The Meta image hash — used as the asset id. */
+  hash: string;
+  /** The Meta-hosted image URL, if returned (surfaced to caption writers). */
+  url?: string;
+}
+
 /**
  * Uploads an image to /{ad_account_id}/adimages via multipart and returns the
- * Meta-assigned hash (the image "asset_id").
+ * Meta-assigned hash (the image "asset_id") plus the hosted image URL.
  */
 export async function uploadImage(
   accountId: string,
   token: string,
   filename: string,
   bytes: Blob
-): Promise<string> {
+): Promise<UploadImageResult> {
   const form = new FormData();
   form.append("access_token", token);
   // The multipart field name becomes the key in the response `images` map.
@@ -84,11 +91,13 @@ export async function uploadImage(
 
   const body = await res.json();
   const images = body.images ?? {};
-  const first = Object.values(images)[0] as { hash?: string } | undefined;
+  const first = Object.values(images)[0] as
+    | { hash?: string; url?: string }
+    | undefined;
   if (!first?.hash) {
     throw new MetaApiError("Meta did not return an image hash", 502);
   }
-  return first.hash;
+  return { hash: first.hash, url: first.url };
 }
 
 export interface VideoStartResult {

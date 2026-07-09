@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import { signIn } from "next-auth/react";
 import { upload } from "@vercel/blob/client";
 import AccountSelector from "./AccountSelector";
 import SourceToggle, { type UploadSource } from "./SourceToggle";
 import DropZone from "./DropZone";
 import DrivePicker from "./DrivePicker";
+import FolderSelector, { type PickedFolder } from "./FolderSelector";
 import FileList from "./FileList";
 import ResultsPanel from "./ResultsPanel";
 import {
@@ -33,6 +35,12 @@ export default function UploadUI() {
   const [items, setItems] = useState<SelectedItem[]>([]);
   const [states, setStates] = useState<Record<string, UploadState>>({});
   const [phase, setPhase] = useState<Phase>("selecting");
+  // Destination folder for the per-video transcript Docs. One per batch, not
+  // persisted (no DB). Required to upload when the batch contains video(s).
+  const [folder, setFolder] = useState<PickedFolder | null>(null);
+  // Set when a Doc creation fails on a missing OAuth scope — prompts a one-time
+  // Google re-consent (already-linked users predate the drive.file/documents scopes).
+  const [needsReconnect, setNeedsReconnect] = useState(false);
 
   const update = useCallback((id: string, patch: Partial<UploadState>) => {
     setStates((prev) => ({
@@ -74,6 +82,39 @@ export default function UploadUI() {
     setPhase("selecting");
   }, []);
 
+  // Creates the transcript Doc for a video that just uploaded successfully.
+  // Best-effort: a failure records `docError` but never downgrades the success.
+  const createDocFor = useCallback(
+    async (item: SelectedItem, videoId: string, acct: string) => {
+      if (!folder) return;
+      try {
+        const res = await fetch("/api/drive/doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: item.name,
+            folderId: folder.id,
+            videoId,
+            accountId: acct,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          if (body.needsReconnect) setNeedsReconnect(true);
+          throw new Error(body.error || `Doc creation failed (${res.status})`);
+        }
+        const body = await res.json();
+        update(item.id, { docUrl: body.url });
+      } catch (err) {
+        update(item.id, {
+          docError:
+            err instanceof Error ? err.message : "Doc creation failed",
+        });
+      }
+    },
+    [folder, update]
+  );
+
   // ---- single-item upload workers -------------------------------------------
 
   const uploadImage = useCallback(
@@ -108,7 +149,12 @@ export default function UploadUI() {
       }
       if (!res.ok) throw new Error(await readError(res));
       const body = await res.json();
-      update(item.id, { status: "success", progress: 1, assetId: body.assetId });
+      update(item.id, {
+        status: "success",
+        progress: 1,
+        assetId: body.assetId,
+        imageUrl: body.imageUrl,
+      });
     },
     [update]
   );
@@ -174,8 +220,9 @@ export default function UploadUI() {
       }
 
       update(item.id, { status: "success", progress: 1, assetId: videoId });
+      await createDocFor(item, videoId, acct);
     },
-    [update]
+    [update, createDocFor]
   );
 
   const uploadDriveVideo = useCallback(
@@ -202,7 +249,9 @@ export default function UploadUI() {
                 assetId: msg.assetId,
               });
               es.close();
-              resolve();
+              // Create the transcript Doc, then resolve the worker (best-effort;
+              // createDocFor never throws).
+              createDocFor(item, msg.assetId, acct).finally(() => resolve());
             } else if (msg.type === "error") {
               es.close();
               reject(new Error(msg.error || "Drive video upload failed"));
@@ -216,7 +265,7 @@ export default function UploadUI() {
           reject(new Error("Connection to server lost during upload"));
         };
       }),
-    [update]
+    [update, createDocFor]
   );
 
   const uploadOne = useCallback(
@@ -262,14 +311,42 @@ export default function UploadUI() {
     setPhase("done");
   }, [accountId, items, uploadOne]);
 
+  const hasVideo = useMemo(
+    () => items.some((i) => isVideoMime(i.mimeType)),
+    [items]
+  );
+
   const canUpload = useMemo(
-    () => Boolean(accountId) && items.length > 0 && phase === "selecting",
-    [accountId, items.length, phase]
+    () =>
+      Boolean(accountId) &&
+      items.length > 0 &&
+      phase === "selecting" &&
+      // A destination folder is required whenever the batch contains video(s),
+      // since each successful video gets a transcript Doc created there.
+      (!hasVideo || Boolean(folder)),
+    [accountId, items.length, phase, hasVideo, folder]
   );
 
   return (
     <div className="space-y-6">
       <AccountSelector value={accountId} onChange={setAccountId} />
+
+      {phase === "selecting" && hasVideo && (
+        <FolderSelector value={folder} onPick={setFolder} />
+      )}
+
+      {needsReconnect && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Google needs to be reconnected to create Docs (new permissions were
+          added).{" "}
+          <button
+            onClick={() => signIn("google", { callbackUrl: "/" })}
+            className="font-medium underline underline-offset-2 hover:text-amber-900"
+          >
+            Reconnect Google
+          </button>
+        </div>
+      )}
 
       <div className="space-y-4">
         <div className="flex items-center justify-between">

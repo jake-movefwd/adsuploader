@@ -3,34 +3,12 @@
 import { useCallback, useState } from "react";
 import { signIn, useSession } from "next-auth/react";
 import { ACCEPTED_MIME_TYPES } from "@/lib/constants";
+import { launchPicker } from "@/lib/google-picker";
 import type { DriveItem } from "@/lib/upload-types";
-
-declare global {
-  interface Window {
-    gapi: any;
-    google: any;
-  }
-}
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
 const APP_ID = process.env.NEXT_PUBLIC_GOOGLE_APP_ID;
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-
-/** Injects an external script once, resolving when it has loaded. */
-function loadScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
-    const el = document.createElement("script");
-    el.src = src;
-    el.async = true;
-    el.onload = () => resolve();
-    el.onerror = () => reject(new Error(`Failed to load ${src}`));
-    document.head.appendChild(el);
-  });
-}
 
 export default function DrivePicker({
   onAdd,
@@ -40,41 +18,6 @@ export default function DrivePicker({
   const { data: session } = useSession();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const openPicker = useCallback(
-    (accessToken: string) => {
-      const google = window.google;
-      const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
-        .setIncludeFolders(true)
-        .setSelectFolderEnabled(false)
-        .setMimeTypes(ACCEPTED_MIME_TYPES.join(","));
-
-      // No developer key: it's only used for quota tracking on unauthenticated
-      // views (e.g. public search) — this DocsView is fully OAuth-scoped via
-      // setOAuthToken(), and doesn't need one. See CLAUDE.md before re-adding.
-      const picker = new google.picker.PickerBuilder()
-        .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
-        .setAppId(APP_ID)
-        .setOAuthToken(accessToken)
-        .addView(view)
-        .setCallback((data: any) => {
-          if (data.action === google.picker.Action.PICKED) {
-            const items: DriveItem[] = (data.docs ?? []).map((doc: any) => ({
-              source: "drive" as const,
-              id: `drive-${doc.id}`,
-              fileId: doc.id,
-              name: doc.name,
-              mimeType: doc.mimeType,
-              sizeBytes: Number(doc.sizeBytes ?? 0),
-            }));
-            if (items.length) onAdd(items);
-          }
-        })
-        .build();
-      picker.setVisible(true);
-    },
-    [onAdd]
-  );
 
   const launch = useCallback(async () => {
     // The Picker needs a Google account linked; connect on-demand.
@@ -92,35 +35,36 @@ export default function DrivePicker({
     setError(null);
     setLoading(true);
     try {
-      await Promise.all([
-        loadScript("https://apis.google.com/js/api.js"),
-        loadScript("https://accounts.google.com/gsi/client"),
-      ]);
-
-      await new Promise<void>((resolve) =>
-        window.gapi.load("picker", () => resolve())
-      );
-
-      // Mint a short-lived, drive.readonly-only token used ONLY to render the
-      // Picker. File downloads still happen server-side with the session token.
-      const tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: CLIENT_ID,
+      await launchPicker({
+        clientId: CLIENT_ID,
+        appId: APP_ID,
         scope: DRIVE_SCOPE,
-        callback: (resp: any) => {
-          setLoading(false);
-          if (resp.error || !resp.access_token) {
-            setError("Could not obtain Google Drive access.");
-            return;
-          }
-          openPicker(resp.access_token);
+        multiselect: true,
+        buildView: (picker) =>
+          new picker.DocsView(picker.ViewId.DOCS)
+            .setIncludeFolders(true)
+            .setSelectFolderEnabled(false)
+            .setMimeTypes(ACCEPTED_MIME_TYPES.join(",")),
+        onPicked: (docs) => {
+          const items: DriveItem[] = docs.map((doc: any) => ({
+            source: "drive" as const,
+            id: `drive-${doc.id}`,
+            fileId: doc.id,
+            name: doc.name,
+            mimeType: doc.mimeType,
+            sizeBytes: Number(doc.sizeBytes ?? 0),
+          }));
+          if (items.length) onAdd(items);
         },
       });
-      tokenClient.requestAccessToken({ prompt: "" });
     } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to open Drive picker"
+      );
+    } finally {
       setLoading(false);
-      setError(err instanceof Error ? err.message : "Failed to open Drive picker");
     }
-  }, [session?.hasGoogle, openPicker]);
+  }, [session?.hasGoogle, onAdd]);
 
   return (
     <div className="rounded-xl border border-slate-300 bg-slate-50 px-6 py-10 text-center">

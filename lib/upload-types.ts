@@ -34,4 +34,13 @@ export interface UploadState {
   progress: number;
   assetId?: string;
   error?: string;
+  /** Videos: link to the transcript Google Doc created on success. */
+  docUrl?: string;
+  /** Images: the Meta-hosted image URL (for caption writers to view the image). */
+  imageUrl?: string;
+  /**
+   * Set when the video uploaded fine but its Doc couldn't be created (best-effort).
+   * The item still counts as a success; only the Doc Link is missing.
+   */
+  docError?: string;
 }

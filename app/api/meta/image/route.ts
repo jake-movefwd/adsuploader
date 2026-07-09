@@ -30,7 +30,8 @@ export const runtime = "nodejs";
  *   - Legacy local: multipart/form-data with `accountId` and `file`, kept for
  *             small files that don't go through Blob.
  *
- * Responds with { filename, assetId } where assetId is the Meta image hash.
+ * Responds with { filename, assetId, imageUrl } where assetId is the Meta image
+ * hash and imageUrl is the Meta-hosted image URL (when returned).
  */
 export async function POST(req: NextRequest) {
   let blobUrlToClean: string | null = null;
@@ -114,8 +115,8 @@ export async function POST(req: NextRequest) {
       blob = file;
     }
 
-    const assetId = await uploadImage(accountId, fbToken, filename, blob);
-    return NextResponse.json({ filename, assetId });
+    const { hash, url } = await uploadImage(accountId, fbToken, filename, blob);
+    return NextResponse.json({ filename, assetId: hash, imageUrl: url });
   } catch (err) {
     if (err instanceof UnauthorizedError) {
       return unauthorizedResponse(err.message);

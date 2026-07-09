@@ -11,8 +11,12 @@ Guidance for Claude Code when working in this repository.
 
 **Ads Uploader** — an internal tool for the Move team. Log in with Facebook, pick a
 Meta ad account, upload image/video creative (from Google Drive or local), and get
-back a copy-pasteable list of `filename - asset_id`. Deploys to Vercel at
-`adsuploader.movefwd.co`. Internal only — the only unauthenticated page is `/login`.
+back a copy-pasteable table (`Filename ⇥ Asset ID ⇥ Doc Link ⇥ Image URL`). For each
+uploaded **video** a Google Doc is created in a user-picked Drive folder (for a
+transcript to be written elsewhere) and its link goes in the Doc Link column; for
+each **image** the Meta-hosted image URL goes in the Image URL column. Deploys to
+Vercel at `adsuploader.movefwd.co`. Internal only — the only unauthenticated page is
+`/login`.
 
 ## Stack
 
@@ -42,6 +46,15 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
   token unless `jwt()` explicitly recovers it, which it does by decoding the
   current session cookie via `next-auth/jwt`'s `decode()` before applying the
   provider that was just used. Don't "simplify" this away.
+- **Google scopes (`lib/auth.ts` `GOOGLE_SCOPES`):** `drive.readonly` (read files
+  for upload), `drive.file` (create the per-video transcript Doc in the picked
+  folder), `documents` (seed the Doc's heading/reference via the Docs API).
+  Gotcha: users who linked Google *before* `drive.file`/`documents` were added
+  hold a `drive.readonly`-only session token; Doc creation 403s until they re-run
+  `signIn("google")`. The doc route returns `needsReconnect: true` on that 403 and
+  `UploadUI` shows a "Reconnect Google" banner. There is still **no token refresh**
+  — `expiresAt` is stored but unused; an expired Google token 401s (same as Drive
+  reads today).
 - **Google Picker developer key:** `components/DrivePicker.tsx` never calls
   `setDeveloperKey()` — `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY` isn't used at all.
   A developer key is only needed for quota tracking on unauthenticated Picker
@@ -50,6 +63,17 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
   breaks the picker (`The API developer key is invalid`). Don't re-add it
   without confirming the key is correctly scoped to the same GCP project as
   `GOOGLE_CLIENT_ID`/`NEXT_PUBLIC_GOOGLE_APP_ID` first.
+- **Picker bootstrap is shared (`lib/google-picker.ts`):** `launchPicker()` loads
+  gapi/GIS, mints a Picker-only client token, and opens a Picker with a
+  caller-supplied view. `DrivePicker.tsx` uses it for file selection
+  (`drive.readonly`, multiselect); `FolderSelector.tsx` uses it for the
+  destination-folder picker (`ViewId.FOLDERS`, `setSelectFolderEnabled(true)`,
+  **`drive.file`** scope). The folder picker MUST request `drive.file` (not
+  `drive.readonly`): selecting the folder under `drive.file` is what grants the
+  server session token — same OAuth client + `drive.file` — permission to create
+  the Doc inside it. `FolderSelector` renders only when the batch has ≥1 video and
+  a folder must be chosen before Upload is enabled (one folder per batch, not
+  persisted).
 - **Tokens never reach the browser.** The `session` callback exposes only display
   fields + `hasFacebook`/`hasGoogle` booleans. The one exception is the Google
   Picker, which mints a short-lived `drive.readonly` token client-side *only* to
@@ -61,8 +85,11 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
 - **No persistence:** files stream browser → API route → Meta (or Drive → route →
   Meta). Never write uploaded files to disk or a DB; hold bytes in memory only.
 - **Server-only helpers:** `lib/meta.ts` (Graph API — images + video phases,
-  `MetaApiError`), `lib/drive.ts` (Drive metadata + download, `DriveApiError`).
-  These take tokens explicitly and must only be imported by API routes.
+  `MetaApiError`; `uploadImage` returns `{hash, url}` — the Meta-hosted image URL),
+  `lib/drive.ts` (Drive metadata + download + `createDoc` (Drive `files.create` a
+  Google Doc in a folder, then Docs `batchUpdate` to seed it), `DriveApiError` with
+  a `needsReconnect` flag set on scope-403s). These take tokens explicitly and must
+  only be imported by API routes.
 - **Shared constants (`lib/constants.ts`):** accepted MIME types, `VIDEO_CHUNK_SIZE`
   (10MB), `MAX_CONCURRENT_UPLOADS` (3). Client types live in `lib/upload-types.ts`.
 
@@ -87,6 +114,14 @@ Before committing non-trivial changes, run `npm run typecheck` and `npm run buil
   events. Declares `maxDuration = 300` (watch Vercel function limits for big files).
 - Batch runner in `components/UploadUI.tsx`: concurrency capped at 3 via
   `Promise.allSettled`; a failed file shows inline and never halts the batch.
+- **Transcript Docs (`POST /api/drive/doc`, `createDocFor` in `UploadUI`):** after a
+  video reaches `success` (local: post-poll; Drive: SSE `done`), the client calls
+  the doc route with `{name, folderId, videoId, accountId}` and stashes the returned
+  `webViewLink` in `UploadState.docUrl`. **Best-effort** — a doc failure sets
+  `docError` but never downgrades the already-succeeded upload (per the "only on
+  success" rule). Images don't create Docs; they carry the Meta URL in
+  `UploadState.imageUrl` instead. `ResultsPanel` renders both as the Doc Link /
+  Image URL output columns.
 
 ## Environment
 

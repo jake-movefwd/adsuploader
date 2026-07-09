@@ -18,15 +18,21 @@ export default function ResultsPanel({
     (i) => states[i.id]?.status === "success"
   ).length;
 
-  // Tab-separated "Filename\tAsset ID" rows (with header), successes only —
-  // pastes directly into spreadsheet columns.
+  // Tab-separated rows (with header), successes only — pastes directly into
+  // spreadsheet columns. Doc Link is the video transcript Doc; Image URL is the
+  // Meta-hosted image (each populated only for its file type, blank otherwise).
   const output = useMemo(() => {
     if (successCount === 0) return "";
     return [
-      "Filename\tAsset ID",
+      "Filename\tAsset ID\tDoc Link\tImage URL",
       ...items
         .filter((i) => states[i.id]?.status === "success")
-        .map((i) => `${i.name}\t${states[i.id].assetId}`),
+        .map((i) => {
+          const s = states[i.id];
+          return `${i.name}\t${s.assetId}\t${s.docUrl ?? ""}\t${
+            s.imageUrl ?? ""
+          }`;
+        }),
     ].join("\n");
   }, [items, states, successCount]);
 
@@ -61,18 +67,41 @@ export default function ResultsPanel({
           {items.map((i) => {
             const s = states[i.id];
             const ok = s?.status === "success";
+            const link = s?.docUrl ?? s?.imageUrl;
             return (
               <li
                 key={i.id}
                 className="flex items-center justify-between px-3 py-2"
               >
                 <span className="truncate text-slate-700">{i.name}</span>
-                <span
-                  className={`ml-3 flex-shrink-0 text-xs ${
-                    ok ? "text-green-700" : "text-red-600"
-                  }`}
-                >
-                  {ok ? s.assetId : s?.error || "Failed"}
+                <span className="ml-3 flex flex-shrink-0 items-center gap-2 text-xs">
+                  {ok ? (
+                    <>
+                      <span className="text-green-700">{s.assetId}</span>
+                      {link && (
+                        <a
+                          href={link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-600 underline underline-offset-2 hover:text-blue-500"
+                        >
+                          {s.docUrl ? "Doc" : "Image"}
+                        </a>
+                      )}
+                      {s.docError && (
+                        <span
+                          className="text-amber-700"
+                          title={s.docError}
+                        >
+                          doc failed — reconnect Google
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-red-600">
+                      {s?.error || "Failed"}
+                    </span>
+                  )}
                 </span>
               </li>
             );
@@ -98,7 +127,7 @@ export default function ResultsPanel({
           value={output}
           rows={Math.min(Math.max(successCount, 3), 12)}
           className="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-sm text-slate-800 focus:outline-none"
-          placeholder={"Successful uploads will appear here as tab-separated rows:\nFilename\tAsset ID"}
+          placeholder={"Successful uploads will appear here as tab-separated rows:\nFilename\tAsset ID\tDoc Link\tImage URL"}
         />
       </div>
     </section>
