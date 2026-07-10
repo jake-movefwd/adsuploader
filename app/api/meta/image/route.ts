@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { del } from "@vercel/blob";
+import { del, get } from "@vercel/blob";
 import { uploadImage, MetaApiError } from "@/lib/meta";
 import {
   downloadDriveFile,
@@ -57,14 +57,16 @@ export async function POST(req: NextRequest) {
           );
         }
         blobUrlToClean = blobUrl;
-        const blobRes = await fetch(blobUrl);
-        if (!blobRes.ok) {
+        // The blob lives in a private store, so it can't be fetched anonymously
+        // by URL — read it back with the read-write token via the SDK.
+        const blobRes = await get(blobUrl, { access: "private" });
+        if (!blobRes || blobRes.statusCode !== 200) {
           return NextResponse.json(
             { error: "Failed to read uploaded file" },
             { status: 502 }
           );
         }
-        const contentTypeHeader = blobRes.headers.get("content-type") ?? "";
+        const contentTypeHeader = blobRes.blob.contentType ?? "";
         if (!isAcceptedMimeType(contentTypeHeader)) {
           return NextResponse.json(
             { error: `Unsupported file type: ${contentTypeHeader}` },
@@ -73,7 +75,7 @@ export async function POST(req: NextRequest) {
         }
         accountId = acct;
         filename = fname;
-        blob = await blobRes.blob();
+        blob = await new Response(blobRes.stream).blob();
       } else {
         const { fileId } = payload;
         if (!acct || !fileId) {

@@ -124,7 +124,7 @@ export default function UploadUI() {
       if (item.source === "local") {
         const file = (item as LocalItem).file;
         const blob = await upload(file.name, file, {
-          access: "public",
+          access: "private",
           handleUploadUrl: "/api/blob/upload",
           onUploadProgress: ({ percentage }) => {
             update(item.id, { progress: (percentage / 100) * 0.9 });
