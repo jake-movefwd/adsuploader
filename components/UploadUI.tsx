@@ -33,6 +33,19 @@ async function readError(res: Response): Promise<string> {
   return body.error || `Request failed (${res.status})`;
 }
 
+/**
+ * The name Meta stores for a crop's ad image: the source filename with the aspect
+ * ratio ("beach 9:16.jpg"). The blob/File name keeps a filesystem-safe suffix
+ * (`beach-9x16.jpg`) since colons can't appear in a Vercel Blob pathname; only
+ * the human-readable name sent to Meta uses the "9:16" form.
+ */
+function metaFilenameForCrop(sourceName: string, aspect: string): string {
+  const dot = sourceName.lastIndexOf(".");
+  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
+  const ext = dot > 0 ? sourceName.slice(dot) : "";
+  return `${stem} ${aspect}${ext}`;
+}
+
 export default function UploadUI() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [source, setSource] = useState<UploadSource>("local");
@@ -115,6 +128,22 @@ export default function UploadUI() {
     });
   }, []);
 
+  // Removes a whole photo (all three aspect crops sharing a groupId) at once,
+  // since the file list shows one photo's crops as a single ad. Crop ids are
+  // `${groupId}-${suffix}`, so state entries are matched by that prefix.
+  const removeGroup = useCallback((groupId: string) => {
+    setItems((prev) =>
+      prev.filter((i) => !(i.source === "local" && i.groupId === groupId))
+    );
+    setStates((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((id) => {
+        if (id.startsWith(`${groupId}-`)) delete next[id];
+      });
+      return next;
+    });
+  }, []);
+
   const newBatch = useCallback(() => {
     setItems([]);
     setStates({});
@@ -161,7 +190,8 @@ export default function UploadUI() {
       update(item.id, { status: "uploading", progress: 0 });
       let res: Response;
       if (item.source === "local") {
-        const file = (item as LocalItem).file;
+        const local = item as LocalItem;
+        const file = local.file;
         const blob = await upload(file.name, file, {
           access: "private",
           handleUploadUrl: "/api/blob/upload",
@@ -170,13 +200,18 @@ export default function UploadUI() {
           },
         });
         update(item.id, { progress: 0.9 });
+        // Crops carry the aspect ratio in the name Meta stores; plain local
+        // uploads keep their original filename.
+        const filename = local.aspect
+          ? metaFilenameForCrop(local.name, local.aspect)
+          : file.name;
         res = await fetch("/api/meta/image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             accountId: acct,
             blobUrl: blob.url,
-            filename: file.name,
+            filename,
           }),
         });
       } else {
@@ -419,6 +454,7 @@ export default function UploadUI() {
         items={items}
         states={states}
         onRemove={removeItem}
+        onRemoveGroup={removeGroup}
         removable={phase === "selecting"}
       />
 
