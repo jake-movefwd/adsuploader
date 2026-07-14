@@ -71,7 +71,9 @@ export default function ResultsPanel({
     const header = [
       "Filename",
       ...ASPECTS.flatMap((a) => [`${a.key} Hash`, `${a.key} URL`]),
-      ...(hasVideo ? ["Video ID", "Doc Link"] : []),
+      ...(hasVideo
+        ? ["Video ID", "Thumbnail Hash", "Thumbnail URL", "Doc Link"]
+        : []),
     ].join("\t");
 
     const imageLines = imageGroups
@@ -83,7 +85,8 @@ export default function ResultsPanel({
           const ok = s?.status === "success";
           cells.push(ok ? s?.assetId ?? "" : "", ok ? s?.imageUrl ?? "" : "");
         });
-        if (hasVideo) cells.push("", "");
+        // Video ID, Thumbnail Hash, Thumbnail URL, Doc Link (blank on image rows).
+        if (hasVideo) cells.push("", "", "", "");
         return cells.join("\t");
       });
 
@@ -92,7 +95,12 @@ export default function ResultsPanel({
       .map((v) => {
         const cells: string[] = [v.name];
         ASPECTS.forEach(() => cells.push("", ""));
-        cells.push(v.state?.assetId ?? "", v.state?.docUrl ?? "");
+        cells.push(
+          v.state?.assetId ?? "",
+          v.state?.thumbnailAssetId ?? "",
+          v.state?.thumbnailUrl ?? "",
+          v.state?.docUrl ?? ""
+        );
         return cells.join("\t");
       });
 
@@ -175,6 +183,24 @@ export default function ResultsPanel({
                   {ok ? (
                     <>
                       <span className="text-green-700">{v.state?.assetId}</span>
+                      {v.state?.thumbnailUrl && (
+                        <a
+                          href={v.state.thumbnailUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-600 underline underline-offset-2 hover:text-blue-500"
+                        >
+                          Thumb
+                        </a>
+                      )}
+                      {v.state?.thumbnailError && (
+                        <span
+                          className="text-amber-700"
+                          title={v.state.thumbnailError}
+                        >
+                          thumbnail failed
+                        </span>
+                      )}
                       {v.state?.docUrl && (
                         <a
                           href={v.state.docUrl}

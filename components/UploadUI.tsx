@@ -11,6 +11,7 @@ import FolderSelector, { type PickedFolder } from "./FolderSelector";
 import FileList from "./FileList";
 import ResultsPanel from "./ResultsPanel";
 import ImageCropper from "./ImageCropper";
+import ThumbnailPicker from "./ThumbnailPicker";
 import {
   ASPECTS,
   MAX_CONCURRENT_UPLOADS,
@@ -61,6 +62,17 @@ export default function UploadUI() {
   // Queue of source photos awaiting cropping. The cropper modal processes the
   // first one; each finished photo yields three crop items into the batch.
   const [pendingCrops, setPendingCrops] = useState<PendingCrop[]>([]);
+  // Chosen thumbnail File per video item id. Required for every video before
+  // upload; uploaded to Meta as an ad image alongside the video.
+  const [thumbnails, setThumbnails] = useState<Record<string, File>>({});
+  // The video whose thumbnail picker is currently open (null = closed).
+  const [thumbnailTarget, setThumbnailTarget] = useState<SelectedItem | null>(
+    null
+  );
+
+  const setThumbnail = useCallback((id: string, file: File) => {
+    setThumbnails((prev) => ({ ...prev, [id]: file }));
+  }, []);
 
   const update = useCallback((id: string, patch: Partial<UploadState>) => {
     setStates((prev) => ({
@@ -126,6 +138,12 @@ export default function UploadUI() {
       delete next[id];
       return next;
     });
+    setThumbnails((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }, []);
 
   // Removes a whole photo (all three aspect crops sharing a groupId) at once,
@@ -147,6 +165,8 @@ export default function UploadUI() {
   const newBatch = useCallback(() => {
     setItems([]);
     setStates({});
+    setThumbnails({});
+    setThumbnailTarget(null);
     setPhase("selecting");
   }, []);
 
@@ -185,52 +205,93 @@ export default function UploadUI() {
 
   // ---- single-item upload workers -------------------------------------------
 
+  // Uploads a local image `File` to Meta via Vercel Blob (bypassing the 4.5MB
+  // Function body limit) and returns its Meta hash + hosted URL. Shared by the
+  // image worker and the per-video thumbnail upload.
+  const uploadImageFile = useCallback(
+    async (
+      file: File,
+      acct: string,
+      filename: string,
+      onProgress?: (progress: number) => void
+    ): Promise<{ assetId: string; imageUrl?: string }> => {
+      const blob = await upload(file.name, file, {
+        access: "private",
+        handleUploadUrl: "/api/blob/upload",
+        onUploadProgress: ({ percentage }) =>
+          onProgress?.((percentage / 100) * 0.9),
+      });
+      onProgress?.(0.9);
+      const res = await fetch("/api/meta/image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: acct, blobUrl: blob.url, filename }),
+      });
+      if (!res.ok) throw new Error(await readError(res));
+      const body = await res.json();
+      return { assetId: body.assetId, imageUrl: body.imageUrl };
+    },
+    []
+  );
+
   const uploadImage = useCallback(
     async (item: SelectedItem, acct: string) => {
       update(item.id, { status: "uploading", progress: 0 });
-      let res: Response;
+      let assetId: string;
+      let imageUrl: string | undefined;
       if (item.source === "local") {
         const local = item as LocalItem;
-        const file = local.file;
-        const blob = await upload(file.name, file, {
-          access: "private",
-          handleUploadUrl: "/api/blob/upload",
-          onUploadProgress: ({ percentage }) => {
-            update(item.id, { progress: (percentage / 100) * 0.9 });
-          },
-        });
-        update(item.id, { progress: 0.9 });
         // Crops carry the aspect ratio in the name Meta stores; plain local
         // uploads keep their original filename.
         const filename = local.aspect
           ? metaFilenameForCrop(local.name, local.aspect)
-          : file.name;
-        res = await fetch("/api/meta/image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            accountId: acct,
-            blobUrl: blob.url,
-            filename,
-          }),
-        });
+          : local.file.name;
+        ({ assetId, imageUrl } = await uploadImageFile(
+          local.file,
+          acct,
+          filename,
+          (p) => update(item.id, { progress: p })
+        ));
       } else {
-        res = await fetch("/api/meta/image", {
+        const res = await fetch("/api/meta/image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ accountId: acct, fileId: (item as DriveItem).fileId }),
         });
+        if (!res.ok) throw new Error(await readError(res));
+        const body = await res.json();
+        assetId = body.assetId;
+        imageUrl = body.imageUrl;
       }
-      if (!res.ok) throw new Error(await readError(res));
-      const body = await res.json();
-      update(item.id, {
-        status: "success",
-        progress: 1,
-        assetId: body.assetId,
-        imageUrl: body.imageUrl,
-      });
+      update(item.id, { status: "success", progress: 1, assetId, imageUrl });
     },
-    [update]
+    [update, uploadImageFile]
+  );
+
+  // Uploads a video's chosen thumbnail to Meta as an ad image after the video
+  // itself has succeeded. Best-effort (mirrors createDocFor): a failure records
+  // `thumbnailError` but never downgrades the already-succeeded video.
+  const uploadThumbnailFor = useCallback(
+    async (item: SelectedItem, acct: string) => {
+      const file = thumbnails[item.id];
+      if (!file) return;
+      try {
+        const dot = item.name.lastIndexOf(".");
+        const stem = dot > 0 ? item.name.slice(0, dot) : item.name;
+        const { assetId, imageUrl } = await uploadImageFile(
+          file,
+          acct,
+          `${stem} thumbnail.jpg`
+        );
+        update(item.id, { thumbnailAssetId: assetId, thumbnailUrl: imageUrl });
+      } catch (err) {
+        update(item.id, {
+          thumbnailError:
+            err instanceof Error ? err.message : "Thumbnail upload failed",
+        });
+      }
+    },
+    [thumbnails, uploadImageFile, update]
   );
 
   const uploadLocalVideo = useCallback(
@@ -294,9 +355,10 @@ export default function UploadUI() {
       }
 
       update(item.id, { status: "success", progress: 1, assetId: videoId });
+      await uploadThumbnailFor(item, acct);
       await createDocFor(item, videoId, acct);
     },
-    [update, createDocFor]
+    [update, createDocFor, uploadThumbnailFor]
   );
 
   const uploadDriveVideo = useCallback(
@@ -323,9 +385,11 @@ export default function UploadUI() {
                 assetId: msg.assetId,
               });
               es.close();
-              // Create the transcript Doc, then resolve the worker (best-effort;
-              // createDocFor never throws).
-              createDocFor(item, msg.assetId, acct).finally(() => resolve());
+              // Upload the thumbnail, then create the transcript Doc, then
+              // resolve the worker (both best-effort; neither throws).
+              uploadThumbnailFor(item, acct)
+                .then(() => createDocFor(item, msg.assetId, acct))
+                .finally(() => resolve());
             } else if (msg.type === "error") {
               es.close();
               reject(new Error(msg.error || "Drive video upload failed"));
@@ -339,7 +403,7 @@ export default function UploadUI() {
           reject(new Error("Connection to server lost during upload"));
         };
       }),
-    [update, createDocFor]
+    [update, createDocFor, uploadThumbnailFor]
   );
 
   const uploadOne = useCallback(
@@ -390,6 +454,12 @@ export default function UploadUI() {
     [items]
   );
 
+  // Every video must have a thumbnail chosen before the batch can upload.
+  const videosNeedThumbnails = useMemo(
+    () => items.some((i) => isVideoMime(i.mimeType) && !thumbnails[i.id]),
+    [items, thumbnails]
+  );
+
   const canUpload = useMemo(
     () =>
       Boolean(accountId) &&
@@ -397,8 +467,10 @@ export default function UploadUI() {
       phase === "selecting" &&
       // A destination folder is required whenever the batch contains video(s),
       // since each successful video gets a transcript Doc created there.
-      (!hasVideo || Boolean(folder)),
-    [accountId, items.length, phase, hasVideo, folder]
+      (!hasVideo || Boolean(folder)) &&
+      // And every video needs a thumbnail chosen.
+      !videosNeedThumbnails,
+    [accountId, items.length, phase, hasVideo, folder, videosNeedThumbnails]
   );
 
   return (
@@ -456,6 +528,8 @@ export default function UploadUI() {
         onRemove={removeItem}
         onRemoveGroup={removeGroup}
         removable={phase === "selecting"}
+        thumbnails={thumbnails}
+        onPickThumbnail={setThumbnailTarget}
       />
 
       {phase === "done" && (
@@ -468,6 +542,18 @@ export default function UploadUI() {
           source={pendingCrops[0]}
           onDone={(crops) => onCropped(pendingCrops[0], crops)}
           onCancel={cancelCrop}
+        />
+      )}
+
+      {thumbnailTarget && (
+        <ThumbnailPicker
+          key={thumbnailTarget.id}
+          item={thumbnailTarget}
+          onDone={(file) => {
+            setThumbnail(thumbnailTarget.id, file);
+            setThumbnailTarget(null);
+          }}
+          onCancel={() => setThumbnailTarget(null)}
         />
       )}
     </div>

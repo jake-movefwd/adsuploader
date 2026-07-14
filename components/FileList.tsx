@@ -95,12 +95,18 @@ export default function FileList({
   onRemove,
   onRemoveGroup,
   removable,
+  thumbnails,
+  onPickThumbnail,
 }: {
   items: SelectedItem[];
   states: Record<string, UploadState>;
   onRemove?: (id: string) => void;
   onRemoveGroup?: (groupId: string) => void;
   removable: boolean;
+  /** Chosen thumbnail File per video item id (selecting phase only). */
+  thumbnails?: Record<string, File>;
+  /** Opens the thumbnail picker for a video item. */
+  onPickThumbnail?: (item: SelectedItem) => void;
 }) {
   // Collapse each photo's three crops (shared groupId) into one row; everything
   // else stays standalone. Preserves first-seen order.
@@ -207,6 +213,8 @@ export default function FileList({
         const { item, state } = row;
         const status = state?.status ?? "pending";
         const showBar = status === "uploading" || status === "processing";
+        const isVideo = isVideoMime(item.mimeType);
+        const hasThumb = Boolean(thumbnails?.[item.id]);
         return (
           <li key={item.id} className="px-4 py-3">
             <div className="flex items-center justify-between gap-3">
@@ -215,7 +223,7 @@ export default function FileList({
                   {item.name}
                 </p>
                 <p className="text-xs text-slate-400">
-                  {isVideoMime(item.mimeType) ? "Video" : "Image"}
+                  {isVideo ? "Video" : "Image"}
                   {item.source === "local" && item.aspect
                     ? ` · ${item.aspect}`
                     : ""}
@@ -224,6 +232,18 @@ export default function FileList({
                 </p>
               </div>
               <div className="flex flex-shrink-0 items-center gap-3">
+                {isVideo && removable && onPickThumbnail && (
+                  <button
+                    onClick={() => onPickThumbnail(item)}
+                    className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                      hasThumb
+                        ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+                        : "border-slate-300 text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    {hasThumb ? "Thumbnail ✓ · Change" : "Set thumbnail"}
+                  </button>
+                )}
                 <StatusBadge status={status} />
                 {removable && onRemove && (
                   <button

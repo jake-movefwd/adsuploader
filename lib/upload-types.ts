@@ -66,4 +66,13 @@ export interface UploadState {
    * The item still counts as a success; only the Doc Link is missing.
    */
   docError?: string;
+  /** Videos: Meta image hash of the chosen thumbnail (uploaded as an ad image). */
+  thumbnailAssetId?: string;
+  /** Videos: Meta-hosted thumbnail URL (goes in the sheet for the ad creator). */
+  thumbnailUrl?: string;
+  /**
+   * Set when the video uploaded fine but its thumbnail couldn't be uploaded
+   * (best-effort). The video still counts as a success; only the thumbnail is missing.
+   */
+  thumbnailError?: string;
 }
