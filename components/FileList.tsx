@@ -65,6 +65,9 @@ export default function FileList({
                 </p>
                 <p className="text-xs text-slate-400">
                   {isVideoMime(item.mimeType) ? "Video" : "Image"}
+                  {item.source === "local" && item.aspect
+                    ? ` · ${item.aspect}`
+                    : ""}
                   {item.sizeBytes ? ` · ${formatSize(item.sizeBytes)}` : ""}
                   {item.source === "drive" ? " · Drive" : ""}
                 </p>

@@ -10,16 +10,20 @@ import DrivePicker from "./DrivePicker";
 import FolderSelector, { type PickedFolder } from "./FolderSelector";
 import FileList from "./FileList";
 import ResultsPanel from "./ResultsPanel";
+import ImageCropper from "./ImageCropper";
 import {
+  ASPECTS,
   MAX_CONCURRENT_UPLOADS,
   VIDEO_CHUNK_SIZE,
   isVideoMime,
+  type Aspect,
 } from "@/lib/constants";
 import type {
   SelectedItem,
   UploadState,
   LocalItem,
   DriveItem,
+  PendingCrop,
 } from "@/lib/upload-types";
 
 type Phase = "selecting" | "uploading" | "done";
@@ -41,6 +45,9 @@ export default function UploadUI() {
   // Set when a Doc creation fails on a missing OAuth scope — prompts a one-time
   // Google re-consent (already-linked users predate the drive.file/documents scopes).
   const [needsReconnect, setNeedsReconnect] = useState(false);
+  // Queue of source photos awaiting cropping. The cropper modal processes the
+  // first one; each finished photo yields three crop items into the batch.
+  const [pendingCrops, setPendingCrops] = useState<PendingCrop[]>([]);
 
   const update = useCallback((id: string, patch: Partial<UploadState>) => {
     setStates((prev) => ({
@@ -65,6 +72,38 @@ export default function UploadUI() {
       });
       return next;
     });
+  }, []);
+
+  const queueCrops = useCallback((sources: PendingCrop[]) => {
+    setPendingCrops((prev) => [...prev, ...sources]);
+  }, []);
+
+  // The cropper finished the current photo: turn its three crops into local
+  // image items (each uploads independently) and advance the queue.
+  const onCropped = useCallback(
+    (source: PendingCrop, crops: { aspect: Aspect; file: File }[]) => {
+      const items: LocalItem[] = crops.map((c) => {
+        const suffix =
+          ASPECTS.find((a) => a.key === c.aspect)?.suffix ?? c.aspect;
+        return {
+          source: "local",
+          id: `${source.groupId}-${suffix}`,
+          file: c.file,
+          name: source.name,
+          mimeType: c.file.type,
+          sizeBytes: c.file.size,
+          aspect: c.aspect,
+          groupId: source.groupId,
+        };
+      });
+      addItems(items);
+      setPendingCrops((prev) => prev.slice(1));
+    },
+    [addItems]
+  );
+
+  const cancelCrop = useCallback(() => {
+    setPendingCrops((prev) => prev.slice(1));
   }, []);
 
   const removeItem = useCallback((id: string) => {
@@ -370,9 +409,9 @@ export default function UploadUI() {
 
         {phase === "selecting" &&
           (source === "local" ? (
-            <DropZone onAdd={addItems} />
+            <DropZone onAdd={addItems} onCropImages={queueCrops} />
           ) : (
-            <DrivePicker onAdd={addItems} />
+            <DrivePicker onAdd={addItems} onCropImages={queueCrops} />
           ))}
       </div>
 
@@ -385,6 +424,15 @@ export default function UploadUI() {
 
       {phase === "done" && (
         <ResultsPanel items={items} states={states} onNewBatch={newBatch} />
+      )}
+
+      {pendingCrops.length > 0 && (
+        <ImageCropper
+          key={pendingCrops[0].groupId}
+          source={pendingCrops[0]}
+          onDone={(crops) => onCropped(pendingCrops[0], crops)}
+          onCancel={cancelCrop}
+        />
       )}
     </div>
   );

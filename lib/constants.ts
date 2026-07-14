@@ -27,3 +27,16 @@ export const VIDEO_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /** Max simultaneous uploads (avoid Meta rate limiting). */
 export const MAX_CONCURRENT_UPLOADS = 3;
+
+/**
+ * The aspect ratios every uploaded image is cropped into. `ratio` is width/height
+ * (fed to react-easy-crop's `aspect`); `suffix` is appended to the crop's filename
+ * (`photo-9x16.jpg`). The array order is also the column order in the results table.
+ */
+export const ASPECTS = [
+  { key: "1:1", ratio: 1, suffix: "1x1" },
+  { key: "9:16", ratio: 9 / 16, suffix: "9x16" },
+  { key: "16:9", ratio: 16 / 9, suffix: "16x9" },
+] as const;
+
+export type Aspect = (typeof ASPECTS)[number]["key"];

@@ -1,8 +1,12 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { ACCEPTED_MIME_TYPES, isAcceptedMimeType } from "@/lib/constants";
-import type { LocalItem } from "@/lib/upload-types";
+import {
+  ACCEPTED_MIME_TYPES,
+  isAcceptedMimeType,
+  isVideoMime,
+} from "@/lib/constants";
+import type { LocalItem, PendingCrop } from "@/lib/upload-types";
 
 let counter = 0;
 function nextId() {
@@ -12,8 +16,11 @@ function nextId() {
 
 export default function DropZone({
   onAdd,
+  onCropImages,
 }: {
   onAdd: (items: LocalItem[]) => void;
+  /** Images are routed here to be cropped before entering the batch. */
+  onCropImages: (sources: PendingCrop[]) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -21,11 +28,15 @@ export default function DropZone({
 
   const handleFiles = (files: FileList | null) => {
     if (!files) return;
-    const accepted: LocalItem[] = [];
+    // Videos go straight into the batch; images are routed to the cropper first.
+    const videos: LocalItem[] = [];
+    const images: PendingCrop[] = [];
     const bad: string[] = [];
     Array.from(files).forEach((file) => {
-      if (isAcceptedMimeType(file.type)) {
-        accepted.push({
+      if (!isAcceptedMimeType(file.type)) {
+        bad.push(file.name);
+      } else if (isVideoMime(file.type)) {
+        videos.push({
           source: "local",
           id: nextId(),
           file,
@@ -34,11 +45,18 @@ export default function DropZone({
           sizeBytes: file.size,
         });
       } else {
-        bad.push(file.name);
+        images.push({
+          groupId: nextId(),
+          name: file.name,
+          mimeType: file.type,
+          source: "local",
+          file,
+        });
       }
     });
     setRejected(bad);
-    if (accepted.length) onAdd(accepted);
+    if (videos.length) onAdd(videos);
+    if (images.length) onCropImages(images);
   };
 
   return (

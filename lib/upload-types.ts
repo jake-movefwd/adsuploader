@@ -1,5 +1,9 @@
 /** Client-side types shared by the upload UI components. */
 
+import type { Aspect } from "./constants";
+
+export type { Aspect };
+
 export interface LocalItem {
   source: "local";
   /** Stable client-side id for React keys + state maps. */
@@ -8,6 +12,25 @@ export interface LocalItem {
   name: string;
   mimeType: string;
   sizeBytes: number;
+  /** Set on crop items: which aspect ratio this crop is (1:1 / 9:16 / 16:9). */
+  aspect?: Aspect;
+  /** Set on crop items: id of the source photo; the 3 crops of one photo share it. */
+  groupId?: string;
+}
+
+/**
+ * A source photo selected for upload but not yet cropped. The cropper turns each
+ * of these into three `LocalItem` crops (one per {@link Aspect}). Local sources
+ * carry the picked `File`; Drive sources carry a `fileId` whose bytes are fetched
+ * from `/api/drive/file` when the cropper opens.
+ */
+export interface PendingCrop {
+  groupId: string;
+  name: string;
+  mimeType: string;
+  source: "local" | "drive";
+  file?: File;
+  fileId?: string;
 }
 
 export interface DriveItem {

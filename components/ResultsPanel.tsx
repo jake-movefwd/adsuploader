@@ -1,7 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ASPECTS, isVideoMime } from "@/lib/constants";
 import type { SelectedItem, UploadState } from "@/lib/upload-types";
+
+interface ImageGroup {
+  id: string;
+  name: string;
+  byAspect: Record<string, UploadState | undefined>;
+}
+
+interface VideoRow {
+  id: string;
+  name: string;
+  state?: UploadState;
+}
 
 export default function ResultsPanel({
   items,
@@ -18,23 +31,73 @@ export default function ResultsPanel({
     (i) => states[i.id]?.status === "success"
   ).length;
 
+  const hasVideo = useMemo(
+    () => items.some((i) => isVideoMime(i.mimeType)),
+    [items]
+  );
+
+  // Group each photo's three crops (shared groupId) into one row; videos stand
+  // alone. Preserves first-seen order for stable output.
+  const { imageGroups, videoRows } = useMemo(() => {
+    const groups: ImageGroup[] = [];
+    const indexById = new Map<string, number>();
+    const videos: VideoRow[] = [];
+
+    items.forEach((i) => {
+      if (i.source === "local" && i.groupId) {
+        let idx = indexById.get(i.groupId);
+        if (idx === undefined) {
+          idx = groups.length;
+          indexById.set(i.groupId, idx);
+          groups.push({ id: i.groupId, name: i.name, byAspect: {} });
+        }
+        if (i.aspect) groups[idx].byAspect[i.aspect] = states[i.id];
+      } else {
+        videos.push({ id: i.id, name: i.name, state: states[i.id] });
+      }
+    });
+
+    return { imageGroups: groups, videoRows: videos };
+  }, [items, states]);
+
   // Tab-separated rows (with header), successes only — pastes directly into
-  // spreadsheet columns. Doc Link is the video transcript Doc; Image URL is the
-  // Meta-hosted image (each populated only for its file type, blank otherwise).
+  // spreadsheet columns. One row per source photo with a Hash + URL column per
+  // aspect; if the batch has any video, two trailing columns (Video ID, Doc
+  // Link) are appended (blank on image rows, and the aspect cells blank on
+  // video rows).
   const output = useMemo(() => {
     if (successCount === 0) return "";
-    return [
-      "Filename\tAsset ID\tDoc Link\tImage URL",
-      ...items
-        .filter((i) => states[i.id]?.status === "success")
-        .map((i) => {
-          const s = states[i.id];
-          return `${i.name}\t${s.assetId}\t${s.docUrl ?? ""}\t${
-            s.imageUrl ?? ""
-          }`;
-        }),
-    ].join("\n");
-  }, [items, states, successCount]);
+
+    const header = [
+      "Filename",
+      ...ASPECTS.flatMap((a) => [`${a.key} Hash`, `${a.key} URL`]),
+      ...(hasVideo ? ["Video ID", "Doc Link"] : []),
+    ].join("\t");
+
+    const imageLines = imageGroups
+      .filter((g) => ASPECTS.some((a) => g.byAspect[a.key]?.status === "success"))
+      .map((g) => {
+        const cells: string[] = [g.name];
+        ASPECTS.forEach((a) => {
+          const s = g.byAspect[a.key];
+          const ok = s?.status === "success";
+          cells.push(ok ? s?.assetId ?? "" : "", ok ? s?.imageUrl ?? "" : "");
+        });
+        if (hasVideo) cells.push("", "");
+        return cells.join("\t");
+      });
+
+    const videoLines = videoRows
+      .filter((v) => v.state?.status === "success")
+      .map((v) => {
+        const cells: string[] = [v.name];
+        ASPECTS.forEach(() => cells.push("", ""));
+        cells.push(v.state?.assetId ?? "", v.state?.docUrl ?? "");
+        return cells.join("\t");
+      });
+
+    return [header, ...imageLines, ...videoLines].join("\n");
+  }, [successCount, hasVideo, imageGroups, videoRows]);
 
   const copyAll = async () => {
     try {
@@ -45,6 +108,8 @@ export default function ResultsPanel({
       setCopied(false);
     }
   };
+
+  const lineCount = output ? output.split("\n").length : 0;
 
   return (
     <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6">
@@ -62,44 +127,73 @@ export default function ResultsPanel({
         {successCount} of {items.length} uploaded successfully
       </p>
 
-      <div className="mt-4 max-h-48 overflow-y-auto rounded-lg border border-slate-200">
+      <div className="mt-4 max-h-56 overflow-y-auto rounded-lg border border-slate-200">
         <ul className="divide-y divide-slate-100 text-sm">
-          {items.map((i) => {
-            const s = states[i.id];
-            const ok = s?.status === "success";
-            const link = s?.docUrl ?? s?.imageUrl;
+          {imageGroups.map((g) => (
+            <li key={g.id} className="flex items-center justify-between px-3 py-2">
+              <span className="truncate text-slate-700">{g.name}</span>
+              <span className="ml-3 flex flex-shrink-0 items-center gap-2 text-xs">
+                {ASPECTS.map((a) => {
+                  const s = g.byAspect[a.key];
+                  if (s?.status === "success") {
+                    return s.imageUrl ? (
+                      <a
+                        key={a.key}
+                        href={s.imageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-blue-600 underline underline-offset-2 hover:text-blue-500"
+                      >
+                        {a.key}
+                      </a>
+                    ) : (
+                      <span key={a.key} className="text-green-700">
+                        {a.key}
+                      </span>
+                    );
+                  }
+                  return (
+                    <span
+                      key={a.key}
+                      className="text-red-500"
+                      title={s?.error || "Failed"}
+                    >
+                      {a.key} ✕
+                    </span>
+                  );
+                })}
+              </span>
+            </li>
+          ))}
+
+          {videoRows.map((v) => {
+            const ok = v.state?.status === "success";
             return (
-              <li
-                key={i.id}
-                className="flex items-center justify-between px-3 py-2"
-              >
-                <span className="truncate text-slate-700">{i.name}</span>
+              <li key={v.id} className="flex items-center justify-between px-3 py-2">
+                <span className="truncate text-slate-700">{v.name}</span>
                 <span className="ml-3 flex flex-shrink-0 items-center gap-2 text-xs">
                   {ok ? (
                     <>
-                      <span className="text-green-700">{s.assetId}</span>
-                      {link && (
+                      <span className="text-green-700">{v.state?.assetId}</span>
+                      {v.state?.docUrl && (
                         <a
-                          href={link}
+                          href={v.state.docUrl}
                           target="_blank"
                           rel="noreferrer"
                           className="text-blue-600 underline underline-offset-2 hover:text-blue-500"
                         >
-                          {s.docUrl ? "Doc" : "Image"}
+                          Doc
                         </a>
                       )}
-                      {s.docError && (
-                        <span
-                          className="text-amber-700"
-                          title={s.docError}
-                        >
+                      {v.state?.docError && (
+                        <span className="text-amber-700" title={v.state.docError}>
                           doc failed — reconnect Google
                         </span>
                       )}
                     </>
                   ) : (
                     <span className="text-red-600">
-                      {s?.error || "Failed"}
+                      {v.state?.error || "Failed"}
                     </span>
                   )}
                 </span>
@@ -125,9 +219,11 @@ export default function ResultsPanel({
         <textarea
           readOnly
           value={output}
-          rows={Math.min(Math.max(successCount, 3), 12)}
+          rows={Math.min(Math.max(lineCount, 3), 12)}
           className="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-sm text-slate-800 focus:outline-none"
-          placeholder={"Successful uploads will appear here as tab-separated rows:\nFilename\tAsset ID\tDoc Link\tImage URL"}
+          placeholder={
+            "Successful uploads will appear here as tab-separated rows:\nFilename\t1:1 Hash\t1:1 URL\t9:16 Hash\t9:16 URL\t16:9 Hash\t16:9 URL"
+          }
         />
       </div>
     </section>

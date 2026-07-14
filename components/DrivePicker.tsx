@@ -2,9 +2,9 @@
 
 import { useCallback, useState } from "react";
 import { signIn, useSession } from "next-auth/react";
-import { ACCEPTED_MIME_TYPES } from "@/lib/constants";
+import { ACCEPTED_MIME_TYPES, isVideoMime } from "@/lib/constants";
 import { launchPicker } from "@/lib/google-picker";
-import type { DriveItem } from "@/lib/upload-types";
+import type { DriveItem, PendingCrop } from "@/lib/upload-types";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
 const APP_ID = process.env.NEXT_PUBLIC_GOOGLE_APP_ID;
@@ -12,8 +12,11 @@ const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
 export default function DrivePicker({
   onAdd,
+  onCropImages,
 }: {
   onAdd: (items: DriveItem[]) => void;
+  /** Images are routed here to be cropped before entering the batch. */
+  onCropImages: (sources: PendingCrop[]) => void;
 }) {
   const { data: session } = useSession();
   const [loading, setLoading] = useState(false);
@@ -46,15 +49,31 @@ export default function DrivePicker({
             .setSelectFolderEnabled(false)
             .setMimeTypes(ACCEPTED_MIME_TYPES.join(",")),
         onPicked: (docs) => {
-          const items: DriveItem[] = docs.map((doc: any) => ({
-            source: "drive" as const,
-            id: `drive-${doc.id}`,
-            fileId: doc.id,
-            name: doc.name,
-            mimeType: doc.mimeType,
-            sizeBytes: Number(doc.sizeBytes ?? 0),
-          }));
-          if (items.length) onAdd(items);
+          // Videos go straight into the batch; images are routed to the cropper.
+          const videos: DriveItem[] = [];
+          const images: PendingCrop[] = [];
+          docs.forEach((doc: any) => {
+            if (isVideoMime(doc.mimeType)) {
+              videos.push({
+                source: "drive",
+                id: `drive-${doc.id}`,
+                fileId: doc.id,
+                name: doc.name,
+                mimeType: doc.mimeType,
+                sizeBytes: Number(doc.sizeBytes ?? 0),
+              });
+            } else {
+              images.push({
+                groupId: `drive-${doc.id}`,
+                name: doc.name,
+                mimeType: doc.mimeType,
+                source: "drive",
+                fileId: doc.id,
+              });
+            }
+          });
+          if (videos.length) onAdd(videos);
+          if (images.length) onCropImages(images);
         },
       });
     } catch (err) {
@@ -64,7 +83,7 @@ export default function DrivePicker({
     } finally {
       setLoading(false);
     }
-  }, [session?.hasGoogle, onAdd]);
+  }, [session?.hasGoogle, onAdd, onCropImages]);
 
   return (
     <div className="rounded-xl border border-slate-300 bg-slate-50 px-6 py-10 text-center">
