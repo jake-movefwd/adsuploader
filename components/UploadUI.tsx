@@ -15,7 +15,6 @@ import { launchPicker } from "@/lib/google-picker";
 import {
   ASPECTS,
   MAX_CONCURRENT_UPLOADS,
-  VIDEO_CHUNK_SIZE,
   isVideoMime,
   type Aspect,
 } from "@/lib/constants";
@@ -324,66 +323,56 @@ export default function UploadUI() {
 
   const uploadLocalVideo = useCallback(
     async (item: LocalItem, acct: string) => {
-      const size = item.sizeBytes;
       update(item.id, { status: "uploading", progress: 0 });
 
-      // Start
-      const startRes = await fetch("/api/meta/video/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: acct, fileSize: size }),
+      // Local videos are too large to chunk through a serverless Function
+      // (Vercel's ~4.5MB body limit). Upload the whole file straight to Vercel
+      // Blob (bypassing that limit), then let the server read it back and drive
+      // Meta's start/transfer/finish loop — the same pattern the Drive path uses.
+      const blob = await upload(item.file.name, item.file, {
+        access: "private",
+        handleUploadUrl: "/api/blob/upload",
+        onUploadProgress: ({ percentage }) =>
+          update(item.id, { progress: (percentage / 100) * 0.5 }),
       });
-      if (!startRes.ok) throw new Error(await readError(startRes));
-      const { uploadSessionId, videoId } = await startRes.json();
 
-      // Transfer in 10MB chunks, advancing by Meta's returned offset.
-      let offset = 0;
-      while (offset < size) {
-        const end = Math.min(offset + VIDEO_CHUNK_SIZE, size);
-        const chunk = item.file.slice(offset, end);
-        const form = new FormData();
-        form.append("accountId", acct);
-        form.append("uploadSessionId", uploadSessionId);
-        form.append("startOffset", String(offset));
-        form.append("chunk", chunk, "chunk");
-        const tRes = await fetch("/api/meta/video/transfer", {
-          method: "POST",
-          body: form,
-        });
-        if (!tRes.ok) throw new Error(await readError(tRes));
-        const t = await tRes.json();
-        offset = Number(t.startOffset);
-        update(item.id, { progress: size ? offset / size : 1 });
-        if (Number(t.startOffset) === Number(t.endOffset)) break;
-      }
+      await new Promise<void>((resolve, reject) => {
+        const url =
+          `/api/meta/video/from-blob?accountId=${encodeURIComponent(acct)}` +
+          `&blobUrl=${encodeURIComponent(blob.url)}` +
+          `&filename=${encodeURIComponent(item.file.name)}`;
+        const es = new EventSource(url);
 
-      // Finish
-      const finishRes = await fetch("/api/meta/video/finish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accountId: acct,
-          uploadSessionId,
-          filename: item.file.name,
-        }),
+        es.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "progress") {
+              update(item.id, {
+                status: msg.phase === "processing" ? "processing" : "uploading",
+                progress: msg.progress ?? 0,
+              });
+            } else if (msg.type === "done") {
+              update(item.id, {
+                status: "success",
+                progress: 1,
+                assetId: msg.assetId,
+              });
+              es.close();
+              // Best-effort thumbnail (never throws), then resolve the worker.
+              uploadThumbnailFor(item, acct).finally(() => resolve());
+            } else if (msg.type === "error") {
+              es.close();
+              reject(new Error(msg.error || "Video upload failed"));
+            }
+          } catch {
+            // ignore malformed frame
+          }
+        };
+        es.onerror = () => {
+          es.close();
+          reject(new Error("Connection to server lost during upload"));
+        };
       });
-      if (!finishRes.ok) throw new Error(await readError(finishRes));
-
-      // Poll processing status
-      update(item.id, { status: "processing", progress: 0 });
-      for (;;) {
-        const sRes = await fetch(
-          `/api/meta/video/status?videoId=${encodeURIComponent(videoId)}`
-        );
-        if (!sRes.ok) throw new Error(await readError(sRes));
-        const s = await sRes.json();
-        update(item.id, { progress: Math.min(s.processingProgress / 100, 1) });
-        if (s.ready) break;
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-
-      update(item.id, { status: "success", progress: 1, assetId: videoId });
-      await uploadThumbnailFor(item, acct);
     },
     [update, uploadThumbnailFor]
   );

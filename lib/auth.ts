@@ -40,6 +40,40 @@ async function getExistingToken(): Promise<JWT | null> {
 }
 
 /**
+ * Exchanges a Google refresh token for a fresh access token. Returns the new
+ * access token and its expiry (epoch seconds), or null if the exchange fails.
+ *
+ * Google access tokens live ~1 hour; without this the server-side Drive calls
+ * (getDriveFileMeta / downloadDriveFile) 401 once the stored token goes stale.
+ */
+async function refreshGoogleAccessToken(
+  refreshToken: string
+): Promise<{ accessToken: string; expiresAt: number } | null> {
+  try {
+    const res = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID as string,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET as string,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      access_token?: string;
+      expires_in?: number;
+    };
+    if (!data.access_token) return null;
+    const expiresAt = Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600);
+    return { accessToken: data.access_token, expiresAt };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * NextAuth configuration.
  *
  * Session strategy is JWT (no database) — nothing persists server-side, per the
@@ -103,6 +137,31 @@ export const authOptions: NextAuthOptions = {
           refreshToken: account.refresh_token ?? token.google?.refreshToken,
           expiresAt: account.expires_at,
         };
+      }
+      // On token reads (no fresh sign-in), transparently refresh the Google
+      // access token when it's at/near expiry so server-side Drive calls never
+      // hit a stale-token 401.
+      if (!account && token.google?.expiresAt) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const expiresSoon = token.google.expiresAt - 60 <= nowSec;
+        if (expiresSoon) {
+          const refreshed = token.google.refreshToken
+            ? await refreshGoogleAccessToken(token.google.refreshToken)
+            : null;
+          if (refreshed) {
+            token.google = {
+              accessToken: refreshed.accessToken,
+              // Google does not return a new refresh token on refresh — keep ours.
+              refreshToken: token.google.refreshToken,
+              expiresAt: refreshed.expiresAt,
+            };
+          } else {
+            // Unrecoverable (refresh failed, or no refresh token on an older
+            // session) — drop Google creds so `hasGoogle` flips false and the UI
+            // re-prompts an on-demand link instead of looping on 401s.
+            delete token.google;
+          }
+        }
       }
       return token;
     },
