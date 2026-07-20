@@ -1,17 +1,12 @@
 import { NextRequest } from "next/server";
-import {
-  startVideoUpload,
-  transferVideoChunk,
-  finishVideoUpload,
-  getVideoStatus,
-} from "@/lib/meta";
+import { uploadVideoFromStream, withRetry } from "@/lib/meta";
 import {
   requireToken,
   requireFacebookToken,
   requireGoogleToken,
 } from "@/lib/session";
-import { downloadDriveFile, getDriveFileMeta } from "@/lib/drive";
-import { VIDEO_CHUNK_SIZE, isVideoMime } from "@/lib/constants";
+import { fetchDriveFileResponse, getDriveFileMeta } from "@/lib/drive";
+import { isVideoMime } from "@/lib/constants";
 
 export const runtime = "nodejs";
 // Server-driven chunked upload can run long; hint a generous duration.
@@ -21,13 +16,15 @@ export const maxDuration = 300;
  * GET /api/meta/video/from-drive?accountId=...&fileId=...  (Server-Sent Events)
  *
  * Drive videos can't be chunked in the browser (the bytes live in Drive), so the
- * server downloads the file and runs Meta's start/transfer/finish/poll loop,
- * streaming progress back as SSE events:
- *   { type: "progress", phase: "upload"|"processing", progress: 0..1 }
- *   { type: "done", assetId, filename }
+ * server streams the file straight from Drive to Meta's start/transfer/finish
+ * flow, forwarding progress as SSE events:
+ *   { type: "progress", phase: "upload", progress: 0..1 }
+ *   { type: "uploaded", assetId, filename }   // bytes transferred; now processing
  *   { type: "error", error }
  *
- * Bytes are held in memory per-chunk and never written to disk.
+ * The file is streamed chunk-by-chunk and never buffered whole in memory. Meta's
+ * processing/transcode is polled by the client via /api/meta/video/status so a
+ * slow transcode can't time out this function.
  */
 export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
@@ -58,54 +55,33 @@ export async function GET(req: NextRequest) {
           return;
         }
 
-        const blob = await downloadDriveFile(googleToken, fileId);
-        const size = blob.size;
-
-        // Start phase
-        const { uploadSessionId, videoId } = await startVideoUpload(
-          accountId,
-          fbToken,
-          size
+        // Stream the Drive body straight through to Meta — never buffered whole.
+        const driveRes = await withRetry(() =>
+          fetchDriveFileResponse(googleToken, fileId)
         );
-
-        // Transfer phase — 10MB chunks, advancing by Meta's returned offset.
-        let offset = 0;
-        while (offset < size) {
-          const end = Math.min(offset + VIDEO_CHUNK_SIZE, size);
-          const chunk = blob.slice(offset, end);
-          const res = await transferVideoChunk(
-            accountId,
-            fbToken,
-            uploadSessionId,
-            offset,
-            chunk
-          );
-          offset = res.startOffset;
-          send({
-            type: "progress",
-            phase: "upload",
-            progress: size ? offset / size : 1,
-          });
-          if (res.startOffset === res.endOffset) break;
+        if (!driveRes.body) {
+          send({ type: "error", error: "Drive returned an empty response" });
+          controller.close();
+          return;
         }
 
-        // Finish phase
-        await finishVideoUpload(accountId, fbToken, uploadSessionId, meta.name);
+        const { videoId } = await uploadVideoFromStream({
+          accountId,
+          token: fbToken,
+          size: meta.size,
+          source: driveRes.body,
+          filename: meta.name,
+          onUploadProgress: (uploadedBytes) =>
+            send({
+              type: "progress",
+              phase: "upload",
+              progress: meta.size ? uploadedBytes / meta.size : 1,
+            }),
+        });
 
-        // Poll processing status
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const status = await getVideoStatus(fbToken, videoId);
-          send({
-            type: "progress",
-            phase: "processing",
-            progress: Math.min(status.processingProgress / 100, 1),
-          });
-          if (status.ready) break;
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-
-        send({ type: "done", assetId: videoId, filename: meta.name });
+        // Bytes are in; Meta transcodes async. The client polls
+        // /api/meta/video/status for readiness so this function can return now.
+        send({ type: "uploaded", assetId: videoId, filename: meta.name });
         controller.close();
       } catch (err) {
         const message =

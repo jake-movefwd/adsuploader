@@ -1,31 +1,28 @@
 import { NextRequest } from "next/server";
 import { del, get } from "@vercel/blob";
-import {
-  startVideoUpload,
-  transferVideoChunk,
-  finishVideoUpload,
-  getVideoStatus,
-} from "@/lib/meta";
+import { uploadVideoFromStream } from "@/lib/meta";
 import { requireToken, requireFacebookToken } from "@/lib/session";
-import { VIDEO_CHUNK_SIZE, isVideoMime } from "@/lib/constants";
+import { isVideoMime } from "@/lib/constants";
 
 export const runtime = "nodejs";
 // Server-driven chunked upload can run long; hint a generous duration.
 export const maxDuration = 300;
 
 /**
- * GET /api/meta/video/from-blob?accountId=...&blobUrl=...&filename=...  (SSE)
+ * GET /api/meta/video/from-blob?accountId=...&blobUrl=...&filename=...&size=...  (SSE)
  *
  * Local videos would blow past Vercel's ~4.5MB Function body limit if chunked
  * through a serverless route from the browser, so the browser instead uploads
  * the whole file straight to Vercel Blob (bypassing that limit) and this route
- * reads the bytes back server-to-server and runs Meta's start/transfer/finish/
- * poll loop — mirroring the Drive path in ./from-drive. Progress streams back:
- *   { type: "progress", phase: "upload"|"processing", progress: 0..1 }
- *   { type: "done", assetId, filename }
+ * streams the bytes back server-to-server into Meta's start/transfer/finish
+ * flow — mirroring the Drive path in ./from-drive. Progress streams back:
+ *   { type: "progress", phase: "upload", progress: 0..1 }
+ *   { type: "uploaded", assetId, filename }   // bytes transferred; now processing
  *   { type: "error", error }
  *
- * The transient blob is deleted once the bytes have been forwarded to Meta.
+ * The bytes are streamed chunk-by-chunk (never buffered whole); Meta's transcode
+ * is polled by the client via /api/meta/video/status. The transient blob is
+ * deleted once the bytes have been forwarded to Meta.
  */
 export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
@@ -46,8 +43,14 @@ export async function GET(req: NextRequest) {
         const accountId = req.nextUrl.searchParams.get("accountId");
         const filename =
           req.nextUrl.searchParams.get("filename") || "video";
+        const size = Number(req.nextUrl.searchParams.get("size") ?? 0);
         if (!accountId || !blobUrl) {
           send({ type: "error", error: "accountId and blobUrl are required" });
+          controller.close();
+          return;
+        }
+        if (!size) {
+          send({ type: "error", error: "size is required" });
           controller.close();
           return;
         }
@@ -69,54 +72,32 @@ export async function GET(req: NextRequest) {
           return;
         }
 
-        const blob = await new Response(blobRes.stream).blob();
-        const size = blob.size;
+        // Normalize the SDK stream into a web ReadableStream<Uint8Array> without
+        // buffering the whole file (Response.body is the stream, not a copy).
+        const source = new Response(blobRes.stream).body;
+        if (!source) {
+          send({ type: "error", error: "Failed to read uploaded file" });
+          controller.close();
+          return;
+        }
 
-        // Start phase
-        const { uploadSessionId, videoId } = await startVideoUpload(
+        const { videoId } = await uploadVideoFromStream({
           accountId,
-          fbToken,
-          size
-        );
+          token: fbToken,
+          size,
+          source,
+          filename,
+          onUploadProgress: (uploadedBytes) =>
+            send({
+              type: "progress",
+              phase: "upload",
+              progress: size ? uploadedBytes / size : 1,
+            }),
+        });
 
-        // Transfer phase — advancing by Meta's returned offset.
-        let offset = 0;
-        while (offset < size) {
-          const end = Math.min(offset + VIDEO_CHUNK_SIZE, size);
-          const chunk = blob.slice(offset, end);
-          const res = await transferVideoChunk(
-            accountId,
-            fbToken,
-            uploadSessionId,
-            offset,
-            chunk
-          );
-          offset = res.startOffset;
-          send({
-            type: "progress",
-            phase: "upload",
-            progress: size ? offset / size : 1,
-          });
-          if (res.startOffset === res.endOffset) break;
-        }
-
-        // Finish phase
-        await finishVideoUpload(accountId, fbToken, uploadSessionId, filename);
-
-        // Poll processing status
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const status = await getVideoStatus(fbToken, videoId);
-          send({
-            type: "progress",
-            phase: "processing",
-            progress: Math.min(status.processingProgress / 100, 1),
-          });
-          if (status.ready) break;
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-
-        send({ type: "done", assetId: videoId, filename });
+        // Bytes are in; Meta transcodes async. The client polls
+        // /api/meta/video/status for readiness so this function can return now.
+        send({ type: "uploaded", assetId: videoId, filename });
         controller.close();
       } catch (err) {
         const message =

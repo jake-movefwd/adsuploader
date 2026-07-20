@@ -3,6 +3,8 @@
  * Facebook access token explicitly — tokens must never reach the browser.
  */
 
+import { META_TRANSFER_CHUNK_SIZE } from "@/lib/constants";
+
 const API_VERSION = process.env.META_GRAPH_API_VERSION || "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${API_VERSION}`;
 // Video uploads use the dedicated graph-video host.
@@ -220,4 +222,120 @@ export async function getVideoStatus(
     videoStatus,
     ready: videoStatus === "ready" || processingProgress >= 100,
   };
+}
+
+/**
+ * Retries `fn` on transient failures (network blips, Meta/Drive 5xx, 429) with
+ * exponential backoff. 4xx (bad request, auth, not-a-video) are NOT retried —
+ * they won't succeed on a second try. Used to keep a single hiccup on a long
+ * multi-chunk upload from aborting the whole transfer.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts?: { attempts?: number; baseDelayMs?: number }
+): Promise<T> {
+  const attempts = opts?.attempts ?? 3;
+  const baseDelayMs = opts?.baseDelayMs ?? 500;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i === attempts - 1 || !isRetriableError(err)) throw err;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** i));
+    }
+  }
+  throw lastErr;
+}
+
+/** Retriable = a server-side/transient failure, not a client (4xx) mistake. */
+function isRetriableError(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status;
+  if (typeof status === "number") return status >= 500 || status === 429;
+  // A thrown TypeError from fetch() means the request never completed (DNS,
+  // connection reset, TLS) — safe to retry.
+  return err instanceof TypeError;
+}
+
+/** Concatenates buffered stream parts into one contiguous Uint8Array. */
+function concatChunks(parts: Uint8Array[], total: number): Uint8Array {
+  if (parts.length === 1) return parts[0];
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const part of parts) {
+    out.set(part, pos);
+    pos += part.length;
+  }
+  return out;
+}
+
+/**
+ * Runs Meta's resumable video upload (start → transfer → finish) by STREAMING
+ * `source` and forwarding it to graph-video in `META_TRANSFER_CHUNK_SIZE` chunks.
+ * Only ~one chunk is ever held in memory — the whole file is never buffered —
+ * which is what stops large videos from OOM-ing / timing out the function.
+ *
+ * Meta processing (transcode) is intentionally NOT awaited here; the caller
+ * polls `getVideoStatus` separately so a slow transcode can't exhaust the
+ * upload function's time budget. Returns the new video id.
+ */
+export async function uploadVideoFromStream(params: {
+  accountId: string;
+  token: string;
+  size: number;
+  source: ReadableStream<Uint8Array>;
+  filename?: string;
+  onUploadProgress?: (uploadedBytes: number) => void;
+}): Promise<{ videoId: string }> {
+  const { accountId, token, size, source, filename, onUploadProgress } = params;
+  const chunkSize = META_TRANSFER_CHUNK_SIZE;
+
+  const { uploadSessionId, videoId } = await withRetry(() =>
+    startVideoUpload(accountId, token, size)
+  );
+
+  let offset = 0;
+  let complete = false;
+  const sendChunk = async (bytes: Uint8Array): Promise<void> => {
+    // Copy into a fresh ArrayBuffer-backed view so it's a valid BlobPart
+    // regardless of the source stream's backing buffer type.
+    const buf = new Uint8Array(bytes.byteLength);
+    buf.set(bytes);
+    const res = await withRetry(() =>
+      transferVideoChunk(accountId, token, uploadSessionId, offset, new Blob([buf]))
+    );
+    offset = res.startOffset;
+    onUploadProgress?.(offset);
+    if (res.startOffset === res.endOffset) complete = true;
+  };
+
+  const reader = source.getReader();
+  let buffered: Uint8Array[] = [];
+  let bufferedBytes = 0;
+  let done = false;
+  while (!done && !complete) {
+    const { value, done: streamDone } = await reader.read();
+    if (value && value.length) {
+      buffered.push(value);
+      bufferedBytes += value.length;
+    }
+    done = streamDone;
+    while (bufferedBytes >= chunkSize && !complete) {
+      const combined = concatChunks(buffered, bufferedBytes);
+      await sendChunk(combined.subarray(0, chunkSize));
+      const remainder = combined.subarray(chunkSize);
+      buffered = remainder.length ? [remainder] : [];
+      bufferedBytes = remainder.length;
+    }
+  }
+  // Flush the trailing partial chunk (unless Meta already signalled completion).
+  if (!complete && bufferedBytes > 0) {
+    await sendChunk(concatChunks(buffered, bufferedBytes));
+  }
+
+  await withRetry(() =>
+    finishVideoUpload(accountId, token, uploadSessionId, filename)
+  );
+  return { videoId };
 }

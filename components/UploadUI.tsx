@@ -321,14 +321,110 @@ export default function UploadUI() {
     [thumbnails, uploadImageFile, update]
   );
 
+  // After the bytes are transferred, Meta transcodes the video asynchronously.
+  // The upload routes return at that point (so a slow transcode can't time out
+  // the function); we poll readiness here before treating the video as done.
+  const pollVideoProcessing = useCallback(
+    (videoId: string, itemId: string) =>
+      new Promise<void>((resolve, reject) => {
+        const poll = async () => {
+          try {
+            const res = await fetch(
+              `/api/meta/video/status?videoId=${encodeURIComponent(videoId)}`
+            );
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(body.error || "Failed to check video processing");
+            }
+            const status = await res.json();
+            update(itemId, {
+              status: "processing",
+              progress: Math.min((status.processingProgress ?? 0) / 100, 1),
+            });
+            if (status.ready) {
+              resolve();
+              return;
+            }
+          } catch (err) {
+            reject(
+              err instanceof Error ? err : new Error("Processing check failed")
+            );
+            return;
+          }
+          setTimeout(poll, 2000);
+        };
+        poll();
+      }),
+    [update]
+  );
+
+  // Shared SSE consumer for both the Drive and Blob video upload routes. The
+  // routes stream upload progress, then emit a terminal `uploaded` event once
+  // the bytes reach Meta; we then poll processing to ready. An `onerror` that
+  // arrives WITHOUT a terminal event means the stream dropped mid-upload (e.g.
+  // the function hit a limit) — surface a clear, retryable message rather than
+  // a raw connection error.
+  const runVideoUpload = useCallback(
+    (url: string, item: SelectedItem, acct: string) =>
+      new Promise<void>((resolve, reject) => {
+        const es = new EventSource(url);
+        let terminal = false;
+
+        es.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "progress") {
+              update(item.id, {
+                status: msg.phase === "processing" ? "processing" : "uploading",
+                progress: msg.progress ?? 0,
+              });
+            } else if (msg.type === "uploaded" || msg.type === "done") {
+              terminal = true;
+              es.close();
+              update(item.id, { assetId: msg.assetId });
+              // Legacy `done` means already processed; `uploaded` still needs a
+              // processing wait before the video can be used in an ad.
+              const ready =
+                msg.type === "done"
+                  ? Promise.resolve()
+                  : pollVideoProcessing(msg.assetId, item.id);
+              ready
+                .then(() => {
+                  update(item.id, { status: "success", progress: 1 });
+                  // Best-effort thumbnail (never throws), then resolve.
+                  uploadThumbnailFor(item, acct).finally(() => resolve());
+                })
+                .catch((err) => reject(err));
+            } else if (msg.type === "error") {
+              terminal = true;
+              es.close();
+              reject(new Error(msg.error || "Video upload failed"));
+            }
+          } catch {
+            // ignore malformed frame
+          }
+        };
+        es.onerror = () => {
+          es.close();
+          if (terminal) return;
+          reject(
+            new Error(
+              "Upload interrupted before it finished — this can happen with very large files. Please try again."
+            )
+          );
+        };
+      }),
+    [update, pollVideoProcessing, uploadThumbnailFor]
+  );
+
   const uploadLocalVideo = useCallback(
     async (item: LocalItem, acct: string) => {
       update(item.id, { status: "uploading", progress: 0 });
 
       // Local videos are too large to chunk through a serverless Function
       // (Vercel's ~4.5MB body limit). Upload the whole file straight to Vercel
-      // Blob (bypassing that limit), then let the server read it back and drive
-      // Meta's start/transfer/finish loop — the same pattern the Drive path uses.
+      // Blob (bypassing that limit), then let the server stream it back into
+      // Meta's start/transfer/finish flow — the same pattern the Drive path uses.
       // `multipart` splits the file into parallel parts with automatic retries,
       // so a large upload doesn't ride one long-lived TLS stream (which was
       // failing mid-transfer with ERR_SSL_BAD_RECORD_MAC on big videos).
@@ -340,88 +436,25 @@ export default function UploadUI() {
           update(item.id, { progress: (percentage / 100) * 0.5 }),
       });
 
-      await new Promise<void>((resolve, reject) => {
-        const url =
-          `/api/meta/video/from-blob?accountId=${encodeURIComponent(acct)}` +
-          `&blobUrl=${encodeURIComponent(blob.url)}` +
-          `&filename=${encodeURIComponent(item.file.name)}`;
-        const es = new EventSource(url);
-
-        es.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "progress") {
-              update(item.id, {
-                status: msg.phase === "processing" ? "processing" : "uploading",
-                progress: msg.progress ?? 0,
-              });
-            } else if (msg.type === "done") {
-              update(item.id, {
-                status: "success",
-                progress: 1,
-                assetId: msg.assetId,
-              });
-              es.close();
-              // Best-effort thumbnail (never throws), then resolve the worker.
-              uploadThumbnailFor(item, acct).finally(() => resolve());
-            } else if (msg.type === "error") {
-              es.close();
-              reject(new Error(msg.error || "Video upload failed"));
-            }
-          } catch {
-            // ignore malformed frame
-          }
-        };
-        es.onerror = () => {
-          es.close();
-          reject(new Error("Connection to server lost during upload"));
-        };
-      });
+      const url =
+        `/api/meta/video/from-blob?accountId=${encodeURIComponent(acct)}` +
+        `&blobUrl=${encodeURIComponent(blob.url)}` +
+        `&filename=${encodeURIComponent(item.file.name)}` +
+        `&size=${encodeURIComponent(item.file.size)}`;
+      await runVideoUpload(url, item, acct);
     },
-    [update, uploadThumbnailFor]
+    [update, runVideoUpload]
   );
 
   const uploadDriveVideo = useCallback(
-    (item: DriveItem, acct: string) =>
-      new Promise<void>((resolve, reject) => {
-        update(item.id, { status: "uploading", progress: 0 });
-        const url = `/api/meta/video/from-drive?accountId=${encodeURIComponent(
-          acct
-        )}&fileId=${encodeURIComponent(item.fileId)}`;
-        const es = new EventSource(url);
-
-        es.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "progress") {
-              update(item.id, {
-                status: msg.phase === "processing" ? "processing" : "uploading",
-                progress: msg.progress ?? 0,
-              });
-            } else if (msg.type === "done") {
-              update(item.id, {
-                status: "success",
-                progress: 1,
-                assetId: msg.assetId,
-              });
-              es.close();
-              // Upload the thumbnail (best-effort; never throws), then resolve
-              // the worker. The transcript Doc link was captured at selection time.
-              uploadThumbnailFor(item, acct).finally(() => resolve());
-            } else if (msg.type === "error") {
-              es.close();
-              reject(new Error(msg.error || "Drive video upload failed"));
-            }
-          } catch {
-            // ignore malformed frame
-          }
-        };
-        es.onerror = () => {
-          es.close();
-          reject(new Error("Connection to server lost during upload"));
-        };
-      }),
-    [update, uploadThumbnailFor]
+    (item: DriveItem, acct: string) => {
+      update(item.id, { status: "uploading", progress: 0 });
+      const url = `/api/meta/video/from-drive?accountId=${encodeURIComponent(
+        acct
+      )}&fileId=${encodeURIComponent(item.fileId)}`;
+      return runVideoUpload(url, item, acct);
+    },
+    [update, runVideoUpload]
   );
 
   const uploadOne = useCallback(
