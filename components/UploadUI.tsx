@@ -329,9 +329,13 @@ export default function UploadUI() {
       // (Vercel's ~4.5MB body limit). Upload the whole file straight to Vercel
       // Blob (bypassing that limit), then let the server read it back and drive
       // Meta's start/transfer/finish loop — the same pattern the Drive path uses.
+      // `multipart` splits the file into parallel parts with automatic retries,
+      // so a large upload doesn't ride one long-lived TLS stream (which was
+      // failing mid-transfer with ERR_SSL_BAD_RECORD_MAC on big videos).
       const blob = await upload(item.file.name, item.file, {
         access: "private",
         handleUploadUrl: "/api/blob/upload",
+        multipart: true,
         onUploadProgress: ({ percentage }) =>
           update(item.id, { progress: (percentage / 100) * 0.5 }),
       });
