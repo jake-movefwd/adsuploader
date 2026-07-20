@@ -1,9 +1,10 @@
 /**
- * Client-side Google Picker bootstrap, shared by DrivePicker (file selection)
- * and FolderSelector (destination-folder selection). Loads the gapi + GIS
- * scripts once, mints a short-lived OAuth token via Google Identity Services
- * (used ONLY to render the Picker UI — server operations use the session token),
- * builds a Picker with the caller-supplied view, and returns the picked docs.
+ * Client-side Google Picker bootstrap, shared by DrivePicker (creative file
+ * selection) and UploadUI's transcript-Doc picker (selecting the existing Google
+ * Doc to link per video). Loads the gapi + GIS scripts once, mints a short-lived
+ * OAuth token via Google Identity Services (used ONLY to render the Picker UI —
+ * server operations use the session token), builds a Picker with the
+ * caller-supplied view, and returns the picked docs.
  *
  * No developer key is set — see CLAUDE.md / DrivePicker for why.
  */

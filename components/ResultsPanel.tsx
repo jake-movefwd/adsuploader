@@ -211,11 +211,6 @@ export default function ResultsPanel({
                           Doc
                         </a>
                       )}
-                      {v.state?.docError && (
-                        <span className="text-amber-700" title={v.state.docError}>
-                          doc failed — reconnect Google
-                        </span>
-                      )}
                     </>
                   ) : (
                     <span className="text-red-600">

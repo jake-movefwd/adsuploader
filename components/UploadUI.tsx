@@ -1,17 +1,17 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { signIn } from "next-auth/react";
+import { signIn, useSession } from "next-auth/react";
 import { upload } from "@vercel/blob/client";
 import AccountSelector from "./AccountSelector";
 import SourceToggle, { type UploadSource } from "./SourceToggle";
 import DropZone from "./DropZone";
 import DrivePicker from "./DrivePicker";
-import FolderSelector, { type PickedFolder } from "./FolderSelector";
 import FileList from "./FileList";
 import ResultsPanel from "./ResultsPanel";
 import ImageCropper from "./ImageCropper";
 import ThumbnailPicker from "./ThumbnailPicker";
+import { launchPicker } from "@/lib/google-picker";
 import {
   ASPECTS,
   MAX_CONCURRENT_UPLOADS,
@@ -25,9 +25,17 @@ import type {
   LocalItem,
   DriveItem,
   PendingCrop,
+  PickedDoc,
 } from "@/lib/upload-types";
 
 type Phase = "selecting" | "uploading" | "done";
+
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+const GOOGLE_APP_ID = process.env.NEXT_PUBLIC_GOOGLE_APP_ID;
+// drive.readonly is enough to browse and select an existing Doc; the Picker
+// returns its shareable link directly, so no server call or write scope is needed.
+const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+const GOOGLE_DOC_MIME = "application/vnd.google-apps.document";
 
 async function readError(res: Response): Promise<string> {
   const body = await res.json().catch(() => ({}));
@@ -48,30 +56,42 @@ function metaFilenameForCrop(sourceName: string, aspect: string): string {
 }
 
 export default function UploadUI() {
+  const { data: session } = useSession();
   const [accountId, setAccountId] = useState<string | null>(null);
   const [source, setSource] = useState<UploadSource>("local");
   const [items, setItems] = useState<SelectedItem[]>([]);
   const [states, setStates] = useState<Record<string, UploadState>>({});
   const [phase, setPhase] = useState<Phase>("selecting");
-  // Destination folder for the per-video transcript Docs. One per batch, not
-  // persisted (no DB). Required to upload when the batch contains video(s).
-  const [folder, setFolder] = useState<PickedFolder | null>(null);
-  // Set when a Doc creation fails on a missing OAuth scope — prompts a one-time
-  // Google re-consent (already-linked users predate the drive.file/documents scopes).
-  const [needsReconnect, setNeedsReconnect] = useState(false);
+  // The existing transcript Doc selected per video (keyed by video item id). Not
+  // persisted (no DB). Required to upload for every video in the batch.
+  const [transcriptDocs, setTranscriptDocs] = useState<Record<string, PickedDoc>>(
+    {}
+  );
   // Queue of source photos awaiting cropping. The cropper modal processes the
   // first one; each finished photo yields three crop items into the batch.
   const [pendingCrops, setPendingCrops] = useState<PendingCrop[]>([]);
   // Chosen thumbnail File per video item id. Required for every video before
   // upload; uploaded to Meta as an ad image alongside the video.
   const [thumbnails, setThumbnails] = useState<Record<string, File>>({});
-  // The video whose thumbnail picker is currently open (null = closed).
-  const [thumbnailTarget, setThumbnailTarget] = useState<SelectedItem | null>(
-    null
-  );
+  // Queue of videos awaiting thumbnail selection. The picker modal processes the
+  // first one; videos are enqueued automatically as soon as they're selected.
+  const [thumbnailQueue, setThumbnailQueue] = useState<SelectedItem[]>([]);
 
   const setThumbnail = useCallback((id: string, file: File) => {
     setThumbnails((prev) => ({ ...prev, [id]: file }));
+  }, []);
+
+  // Enqueue videos for thumbnail selection, skipping any already queued.
+  const enqueueThumbnails = useCallback((videos: SelectedItem[]) => {
+    setThumbnailQueue((prev) => {
+      const queued = new Set(prev.map((v) => v.id));
+      const fresh = videos.filter((v) => !queued.has(v.id));
+      return fresh.length ? [...prev, ...fresh] : prev;
+    });
+  }, []);
+
+  const advanceThumbnailQueue = useCallback(() => {
+    setThumbnailQueue((prev) => prev.slice(1));
   }, []);
 
   const update = useCallback((id: string, patch: Partial<UploadState>) => {
@@ -97,7 +117,9 @@ export default function UploadUI() {
       });
       return next;
     });
-  }, []);
+    // Videos need a thumbnail — prompt for it as soon as they're selected.
+    enqueueThumbnails(incoming.filter((i) => isVideoMime(i.mimeType)));
+  }, [enqueueThumbnails]);
 
   const queueCrops = useCallback((sources: PendingCrop[]) => {
     setPendingCrops((prev) => [...prev, ...sources]);
@@ -144,6 +166,13 @@ export default function UploadUI() {
       delete next[id];
       return next;
     });
+    setThumbnailQueue((prev) => prev.filter((v) => v.id !== id));
+    setTranscriptDocs((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }, []);
 
   // Removes a whole photo (all three aspect crops sharing a groupId) at once,
@@ -166,41 +195,40 @@ export default function UploadUI() {
     setItems([]);
     setStates({});
     setThumbnails({});
-    setThumbnailTarget(null);
+    setThumbnailQueue([]);
+    setTranscriptDocs({});
     setPhase("selecting");
   }, []);
 
-  // Creates the transcript Doc for a video that just uploaded successfully.
-  // Best-effort: a failure records `docError` but never downgrades the success.
-  const createDocFor = useCallback(
-    async (item: SelectedItem, videoId: string, acct: string) => {
-      if (!folder) return;
-      try {
-        const res = await fetch("/api/drive/doc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: item.name,
-            folderId: folder.id,
-            videoId,
-            accountId: acct,
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          if (body.needsReconnect) setNeedsReconnect(true);
-          throw new Error(body.error || `Doc creation failed (${res.status})`);
-        }
-        const body = await res.json();
-        update(item.id, { docUrl: body.url });
-      } catch (err) {
-        update(item.id, {
-          docError:
-            err instanceof Error ? err.message : "Doc creation failed",
-        });
+  // Opens the Google Picker (filtered to Google Docs) so the user selects the
+  // video's existing transcript Doc. The Picker returns the Doc's shareable link
+  // directly — no server call — which we stash for output and set on the item now.
+  const pickDocFor = useCallback(
+    async (item: SelectedItem) => {
+      if (!session?.hasGoogle) {
+        signIn("google", { callbackUrl: "/" });
+        return;
       }
+      if (!GOOGLE_CLIENT_ID || !GOOGLE_APP_ID) return;
+      await launchPicker({
+        clientId: GOOGLE_CLIENT_ID,
+        appId: GOOGLE_APP_ID,
+        scope: DRIVE_READONLY_SCOPE,
+        multiselect: false,
+        buildView: (picker) =>
+          new picker.DocsView(picker.ViewId.DOCUMENTS).setMimeTypes(
+            GOOGLE_DOC_MIME
+          ),
+        onPicked: (docs) => {
+          const doc = docs[0];
+          if (!doc) return;
+          const picked: PickedDoc = { id: doc.id, name: doc.name, url: doc.url };
+          setTranscriptDocs((prev) => ({ ...prev, [item.id]: picked }));
+          update(item.id, { docUrl: picked.url });
+        },
+      });
     },
-    [folder, update]
+    [session?.hasGoogle, update]
   );
 
   // ---- single-item upload workers -------------------------------------------
@@ -269,8 +297,8 @@ export default function UploadUI() {
   );
 
   // Uploads a video's chosen thumbnail to Meta as an ad image after the video
-  // itself has succeeded. Best-effort (mirrors createDocFor): a failure records
-  // `thumbnailError` but never downgrades the already-succeeded video.
+  // itself has succeeded. Best-effort: a failure records `thumbnailError` but
+  // never downgrades the already-succeeded video.
   const uploadThumbnailFor = useCallback(
     async (item: SelectedItem, acct: string) => {
       const file = thumbnails[item.id];
@@ -356,9 +384,8 @@ export default function UploadUI() {
 
       update(item.id, { status: "success", progress: 1, assetId: videoId });
       await uploadThumbnailFor(item, acct);
-      await createDocFor(item, videoId, acct);
     },
-    [update, createDocFor, uploadThumbnailFor]
+    [update, uploadThumbnailFor]
   );
 
   const uploadDriveVideo = useCallback(
@@ -385,11 +412,9 @@ export default function UploadUI() {
                 assetId: msg.assetId,
               });
               es.close();
-              // Upload the thumbnail, then create the transcript Doc, then
-              // resolve the worker (both best-effort; neither throws).
-              uploadThumbnailFor(item, acct)
-                .then(() => createDocFor(item, msg.assetId, acct))
-                .finally(() => resolve());
+              // Upload the thumbnail (best-effort; never throws), then resolve
+              // the worker. The transcript Doc link was captured at selection time.
+              uploadThumbnailFor(item, acct).finally(() => resolve());
             } else if (msg.type === "error") {
               es.close();
               reject(new Error(msg.error || "Drive video upload failed"));
@@ -403,7 +428,7 @@ export default function UploadUI() {
           reject(new Error("Connection to server lost during upload"));
         };
       }),
-    [update, createDocFor, uploadThumbnailFor]
+    [update, uploadThumbnailFor]
   );
 
   const uploadOne = useCallback(
@@ -449,15 +474,16 @@ export default function UploadUI() {
     setPhase("done");
   }, [accountId, items, uploadOne]);
 
-  const hasVideo = useMemo(
-    () => items.some((i) => isVideoMime(i.mimeType)),
-    [items]
-  );
-
   // Every video must have a thumbnail chosen before the batch can upload.
   const videosNeedThumbnails = useMemo(
     () => items.some((i) => isVideoMime(i.mimeType) && !thumbnails[i.id]),
     [items, thumbnails]
+  );
+
+  // And every video must have an existing transcript Doc selected.
+  const videosNeedDoc = useMemo(
+    () => items.some((i) => isVideoMime(i.mimeType) && !transcriptDocs[i.id]),
+    [items, transcriptDocs]
   );
 
   const canUpload = useMemo(
@@ -465,34 +491,15 @@ export default function UploadUI() {
       Boolean(accountId) &&
       items.length > 0 &&
       phase === "selecting" &&
-      // A destination folder is required whenever the batch contains video(s),
-      // since each successful video gets a transcript Doc created there.
-      (!hasVideo || Boolean(folder)) &&
-      // And every video needs a thumbnail chosen.
-      !videosNeedThumbnails,
-    [accountId, items.length, phase, hasVideo, folder, videosNeedThumbnails]
+      // Every video needs both a thumbnail and a transcript Doc selected.
+      !videosNeedThumbnails &&
+      !videosNeedDoc,
+    [accountId, items.length, phase, videosNeedThumbnails, videosNeedDoc]
   );
 
   return (
     <div className="space-y-6">
       <AccountSelector value={accountId} onChange={setAccountId} />
-
-      {phase === "selecting" && hasVideo && (
-        <FolderSelector value={folder} onPick={setFolder} />
-      )}
-
-      {needsReconnect && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          Google needs to be reconnected to create Docs (new permissions were
-          added).{" "}
-          <button
-            onClick={() => signIn("google", { callbackUrl: "/" })}
-            className="font-medium underline underline-offset-2 hover:text-amber-900"
-          >
-            Reconnect Google
-          </button>
-        </div>
-      )}
 
       <div className="space-y-4">
         <div className="flex items-center justify-between">
@@ -529,7 +536,9 @@ export default function UploadUI() {
         onRemoveGroup={removeGroup}
         removable={phase === "selecting"}
         thumbnails={thumbnails}
-        onPickThumbnail={setThumbnailTarget}
+        onPickThumbnail={(item) => enqueueThumbnails([item])}
+        transcriptDocs={transcriptDocs}
+        onPickDoc={pickDocFor}
       />
 
       {phase === "done" && (
@@ -545,15 +554,15 @@ export default function UploadUI() {
         />
       )}
 
-      {thumbnailTarget && (
+      {thumbnailQueue.length > 0 && (
         <ThumbnailPicker
-          key={thumbnailTarget.id}
-          item={thumbnailTarget}
+          key={thumbnailQueue[0].id}
+          item={thumbnailQueue[0]}
           onDone={(file) => {
-            setThumbnail(thumbnailTarget.id, file);
-            setThumbnailTarget(null);
+            setThumbnail(thumbnailQueue[0].id, file);
+            advanceThumbnailQueue();
           }}
-          onCancel={() => setThumbnailTarget(null)}
+          onCancel={advanceThumbnailQueue}
         />
       )}
     </div>

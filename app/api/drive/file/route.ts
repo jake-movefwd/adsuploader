@@ -10,17 +10,18 @@ import {
   UnauthorizedError,
   unauthorizedResponse,
 } from "@/lib/session";
-import { isAcceptedMimeType, isVideoMime } from "@/lib/constants";
+import { isAcceptedMimeType } from "@/lib/constants";
 
 export const runtime = "nodejs";
 
 /**
  * GET /api/drive/file?fileId=...
  *
- * Streams the original bytes of a Drive **image** back to the browser so the
- * client-side cropper can display it. Uses the already-held `drive.readonly`
- * scope (no re-consent). Videos are rejected — they're never cropped, and this
- * is only meant for small image files. Bytes are held in memory only.
+ * Streams the original bytes of a Drive image or video back to the browser:
+ * images for the client-side cropper, videos for the thumbnail picker (which
+ * scrubs frames locally). Uses the already-held `drive.readonly` scope (no
+ * re-consent). Bytes are held in memory only — large videos are downloaded in
+ * full so they can be scrubbed.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -33,9 +34,9 @@ export async function GET(req: NextRequest) {
     }
 
     const meta = await getDriveFileMeta(googleToken, fileId);
-    if (!isAcceptedMimeType(meta.mimeType) || isVideoMime(meta.mimeType)) {
+    if (!isAcceptedMimeType(meta.mimeType)) {
       return NextResponse.json(
-        { error: `Not a supported image: ${meta.mimeType}` },
+        { error: `Not a supported file: ${meta.mimeType}` },
         { status: 400 }
       );
     }
@@ -55,7 +56,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     return NextResponse.json(
-      { error: "Failed to load Drive image" },
+      { error: "Failed to load Drive file" },
       { status: 500 }
     );
   }

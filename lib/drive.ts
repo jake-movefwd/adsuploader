@@ -23,8 +23,6 @@ export interface DriveFileMeta {
 }
 
 const DRIVE_BASE = "https://www.googleapis.com/drive/v3";
-const DOCS_BASE = "https://docs.googleapis.com/v1";
-const GOOGLE_DOC_MIME = "application/vnd.google-apps.document";
 
 /** Fetches a file's metadata (name, mimeType, size). */
 export async function getDriveFileMeta(
@@ -98,74 +96,4 @@ async function driveError(res: Response, fallback: string): Promise<never> {
     // non-JSON error body; keep the generic message
   }
   throw new DriveApiError(message, res.status, needsReconnect);
-}
-
-/**
- * Creates a Google Doc named `name` inside `folderId` and seeds it with the name
- * as a heading plus `seedText` as a body line. Returns the Doc's shareable
- * `webViewLink`. Requires the `drive.file` and `documents` scopes on `token`.
- *
- * `drive.file` grants write access to the picked folder only because the user
- * selected it through the Google Picker under the same OAuth client; a 403 here
- * means the linked Google session predates those scopes and must re-consent.
- */
-export async function createDoc(
-  token: string,
-  name: string,
-  folderId: string,
-  seedText: string
-): Promise<string> {
-  // 1. Create the (empty) Doc directly in the destination folder.
-  const createRes = await fetch(
-    `${DRIVE_BASE}/files?fields=id,webViewLink&supportsAllDrives=true`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name,
-        mimeType: GOOGLE_DOC_MIME,
-        parents: [folderId],
-      }),
-    }
-  );
-  if (!createRes.ok) await driveError(createRes, "Failed to create Google Doc");
-  const created = await createRes.json();
-  const docId: string = created.id;
-  const webViewLink: string = created.webViewLink;
-
-  // 2. Seed the body: heading (the filename) + a reference line. The first
-  //    insertable index in a Doc body is 1.
-  const heading = name;
-  const requests = [
-    {
-      insertText: {
-        location: { index: 1 },
-        text: `${heading}\n${seedText}\n`,
-      },
-    },
-    {
-      updateParagraphStyle: {
-        range: { startIndex: 1, endIndex: 1 + heading.length },
-        paragraphStyle: { namedStyleType: "HEADING_1" },
-        fields: "namedStyleType",
-      },
-    },
-  ];
-  const seedRes = await fetch(`${DOCS_BASE}/documents/${docId}:batchUpdate`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ requests }),
-  });
-  // The Doc already exists at this point; if seeding fails, still return the
-  // link rather than losing the Doc — but a 403 scope error is worth surfacing.
-  if (!seedRes.ok && seedRes.status === 403) {
-    await driveError(seedRes, "Failed to write Google Doc content");
-  }
-  return webViewLink;
 }

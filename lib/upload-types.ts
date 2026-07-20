@@ -42,6 +42,14 @@ export interface DriveItem {
   sizeBytes: number;
 }
 
+/** An existing Google Doc selected as a video's transcript (via the Picker). */
+export interface PickedDoc {
+  id: string;
+  name: string;
+  /** The Doc's shareable webViewLink, returned by the Picker. */
+  url: string;
+}
+
 export type SelectedItem = LocalItem | DriveItem;
 
 export type UploadStatus =
@@ -57,15 +65,10 @@ export interface UploadState {
   progress: number;
   assetId?: string;
   error?: string;
-  /** Videos: link to the transcript Google Doc created on success. */
+  /** Videos: link to the selected existing transcript Google Doc. */
   docUrl?: string;
   /** Images: the Meta-hosted image URL (for caption writers to view the image). */
   imageUrl?: string;
-  /**
-   * Set when the video uploaded fine but its Doc couldn't be created (best-effort).
-   * The item still counts as a success; only the Doc Link is missing.
-   */
-  docError?: string;
   /** Videos: Meta image hash of the chosen thumbnail (uploaded as an ad image). */
   thumbnailAssetId?: string;
   /** Videos: Meta-hosted thumbnail URL (goes in the sheet for the ad creator). */

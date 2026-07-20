@@ -1,7 +1,13 @@
 "use client";
 
 import { useMemo } from "react";
-import type { SelectedItem, UploadState, UploadStatus, Aspect } from "@/lib/upload-types";
+import type {
+  SelectedItem,
+  UploadState,
+  UploadStatus,
+  Aspect,
+  PickedDoc,
+} from "@/lib/upload-types";
 import { ASPECTS, isVideoMime } from "@/lib/constants";
 
 function formatSize(bytes: number): string {
@@ -97,6 +103,8 @@ export default function FileList({
   removable,
   thumbnails,
   onPickThumbnail,
+  transcriptDocs,
+  onPickDoc,
 }: {
   items: SelectedItem[];
   states: Record<string, UploadState>;
@@ -107,6 +115,10 @@ export default function FileList({
   thumbnails?: Record<string, File>;
   /** Opens the thumbnail picker for a video item. */
   onPickThumbnail?: (item: SelectedItem) => void;
+  /** Selected transcript Doc per video item id (selecting phase only). */
+  transcriptDocs?: Record<string, PickedDoc>;
+  /** Opens the Google Doc picker for a video item. */
+  onPickDoc?: (item: SelectedItem) => void;
 }) {
   // Collapse each photo's three crops (shared groupId) into one row; everything
   // else stays standalone. Preserves first-seen order.
@@ -215,6 +227,7 @@ export default function FileList({
         const showBar = status === "uploading" || status === "processing";
         const isVideo = isVideoMime(item.mimeType);
         const hasThumb = Boolean(thumbnails?.[item.id]);
+        const hasDoc = Boolean(transcriptDocs?.[item.id]);
         return (
           <li key={item.id} className="px-4 py-3">
             <div className="flex items-center justify-between gap-3">
@@ -242,6 +255,19 @@ export default function FileList({
                     }`}
                   >
                     {hasThumb ? "Thumbnail ✓ · Change" : "Set thumbnail"}
+                  </button>
+                )}
+                {isVideo && removable && onPickDoc && (
+                  <button
+                    onClick={() => onPickDoc(item)}
+                    title={transcriptDocs?.[item.id]?.name}
+                    className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                      hasDoc
+                        ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+                        : "border-slate-300 text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    {hasDoc ? "Transcript ✓ · Change" : "Set transcript"}
                   </button>
                 )}
                 <StatusBadge status={status} />

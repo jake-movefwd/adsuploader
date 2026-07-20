@@ -4,7 +4,22 @@ Living status log. Read this at session start; update it when work completes or 
 decision is made. Keep it concise; prune stale entries. See `CLAUDE.md` for
 architecture and conventions.
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-20_
+
+## 2026-07-20 — Transcript workflow: select existing Doc (not create)
+
+Switched the per-video transcript flow. Previously the user picked one Drive
+**folder** per batch and the app **created** an empty Google Doc per video in it.
+Now the transcript already exists, so the user **selects the existing Doc** per video
+via the Google Picker (`pickDocFor` in `UploadUI`, `ViewId.DOCUMENTS`), and that
+Doc's link goes straight into the output — captured client-side, no server call.
+
+- Removed: `components/FolderSelector.tsx`, `app/api/drive/doc/route.ts`,
+  `createDoc` in `lib/drive.ts`, the `needsReconnect` banner, and `UploadState.docError`.
+- Reduced Google scopes to `drive.readonly` only (dropped `drive.file` + `documents`).
+- Added: `PickedDoc` type, per-video `transcriptDocs` state + `videosNeedDoc` gate,
+  and a "Set transcript" button per video in `FileList`.
+- Build, lint, and typecheck all pass. Not yet exercised against live Google/Meta.
 
 ## Current status
 

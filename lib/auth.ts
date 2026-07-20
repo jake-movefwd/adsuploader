@@ -10,13 +10,11 @@ const GOOGLE_SCOPES = [
   "openid",
   "email",
   "profile",
+  // drive.readonly is all we need: it lets the Picker browse the user's Drive to
+  // select creative files AND to select an existing transcript Doc (whose link goes
+  // straight into the output). We no longer create Docs, so no write scopes
+  // (drive.file / documents) are requested.
   "https://www.googleapis.com/auth/drive.readonly",
-  // drive.file: create the transcript Doc and drop it in the user-picked folder
-  // (per-file access to app-created + Picker-selected items). documents: write the
-  // seeded heading/reference into that Doc via the Docs API. Adding these means
-  // already-linked Google users must re-run signIn("google") once to re-consent.
-  "https://www.googleapis.com/auth/drive.file",
-  "https://www.googleapis.com/auth/documents",
 ].join(" ");
 
 /**
