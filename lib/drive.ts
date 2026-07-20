@@ -74,6 +74,33 @@ export async function downloadDriveFile(
 }
 
 /**
+ * Fetches file content (files.get?alt=media), forwarding an optional HTTP Range
+ * header so callers can stream partial content to a `<video>` element without
+ * buffering the whole file in server memory. Returns the raw upstream Response
+ * (status 200 for a full body, 206 for a partial range) so the caller can pipe
+ * its stream and forward Content-Length / Content-Range.
+ */
+export async function fetchDriveFileResponse(
+  token: string,
+  fileId: string,
+  range?: string | null
+): Promise<Response> {
+  const url = `${DRIVE_BASE}/files/${encodeURIComponent(
+    fileId
+  )}?alt=media&supportsAllDrives=true`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (range) headers.Range = range;
+  const res = await fetch(url, { headers });
+  if (!res.ok && res.status !== 206) {
+    throw new DriveApiError(
+      `Failed to download Drive file (${res.status})`,
+      res.status
+    );
+  }
+  return res;
+}
+
+/**
  * Turns a failed Google API response into a DriveApiError, flagging 403s that
  * are caused by a missing OAuth scope (which need a Google re-consent) so the
  * caller can prompt the user to reconnect rather than treating it as a hard error.

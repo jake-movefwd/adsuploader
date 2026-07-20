@@ -39,41 +39,21 @@ export default function ThumbnailPicker({
   const [chosen, setChosen] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  // Resolve an object URL for the video: local files directly, Drive files via the
-  // server byte-stream (same pattern as ImageCropper). Revoke it on unmount.
+  // Resolve the <video> src. Local files become an object URL from the picked
+  // File. Drive files point straight at the same-origin byte-range endpoint:
+  // the browser then fetches only the ranges it needs to scrub (never the whole
+  // file, which used to 500 the server on large videos), and same-origin keeps
+  // the canvas untainted so frame capture works.
   useEffect(() => {
-    let url: string | null = null;
-    let cancelled = false;
-
-    async function load() {
-      try {
-        let blob: Blob;
-        if (item.source === "local") {
-          blob = item.file;
-        } else {
-          const res = await fetch(
-            `/api/drive/file?fileId=${encodeURIComponent(item.fileId)}`
-          );
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({}));
-            throw new Error(body.error || `Failed to load video (${res.status})`);
-          }
-          blob = await res.blob();
-        }
-        if (cancelled) return;
-        url = URL.createObjectURL(blob);
-        setVideoSrc(url);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load video");
-        }
-      }
+    let objectUrl: string | null = null;
+    if (item.source === "local") {
+      objectUrl = URL.createObjectURL(item.file);
+      setVideoSrc(objectUrl);
+    } else {
+      setVideoSrc(`/api/drive/file?fileId=${encodeURIComponent(item.fileId)}`);
     }
-    load();
-
     return () => {
-      cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [item]);
 
@@ -167,6 +147,9 @@ export default function ThumbnailPicker({
                     setDuration(e.currentTarget.duration || 0)
                   }
                   onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
+                  onError={() =>
+                    setError("Failed to load video — try reopening the picker")
+                  }
                 />
               </div>
 
