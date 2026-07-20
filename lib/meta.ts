@@ -11,7 +11,12 @@ const GRAPH_BASE = `https://graph.facebook.com/${API_VERSION}`;
 const GRAPH_VIDEO_BASE = `https://graph-video.facebook.com/${API_VERSION}`;
 
 export class MetaApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Meta Graph API error code (e.g. 4 = app rate limit), when present. */
+    readonly code?: number
+  ) {
     super(message);
     this.name = "MetaApiError";
   }
@@ -20,15 +25,19 @@ export class MetaApiError extends Error {
 /** Extracts a human-readable message from a Meta error response body. */
 async function readError(res: Response): Promise<never> {
   let message = `Meta API request failed (${res.status})`;
+  let code: number | undefined;
   try {
     const body = await res.json();
     if (body?.error?.message) {
       message = body.error.message;
     }
+    if (typeof body?.error?.code === "number") {
+      code = body.error.code;
+    }
   } catch {
     // non-JSON error body; keep the generic message
   }
-  throw new MetaApiError(message, res.status);
+  throw new MetaApiError(message, res.status, code);
 }
 
 export interface AdAccount {
@@ -235,7 +244,7 @@ export async function withRetry<T>(
   opts?: { attempts?: number; baseDelayMs?: number }
 ): Promise<T> {
   const attempts = opts?.attempts ?? 3;
-  const baseDelayMs = opts?.baseDelayMs ?? 500;
+  const baseDelayMs = opts?.baseDelayMs ?? 1000;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -249,10 +258,20 @@ export async function withRetry<T>(
   throw lastErr;
 }
 
-/** Retriable = a server-side/transient failure, not a client (4xx) mistake. */
+/** Meta rate-limit error codes — retrying these makes throttling worse. */
+const META_RATE_LIMIT_CODES = new Set([4, 17, 32, 613]);
+
+/** Retriable = a genuine transient failure, not a client mistake or throttle. */
 function isRetriableError(err: unknown): boolean {
+  // Never retry a rate limit — backing off harder means NOT hammering it.
+  if (err instanceof MetaApiError && err.code !== undefined) {
+    if (META_RATE_LIMIT_CODES.has(err.code)) return false;
+  }
   const status = (err as { status?: number } | null)?.status;
-  if (typeof status === "number") return status >= 500 || status === 429;
+  if (typeof status === "number") {
+    if (status === 429) return false; // rate limited — do not retry
+    return status >= 500;
+  }
   // A thrown TypeError from fetch() means the request never completed (DNS,
   // connection reset, TLS) — safe to retry.
   return err instanceof TypeError;
@@ -289,49 +308,63 @@ export async function uploadVideoFromStream(params: {
   onUploadProgress?: (uploadedBytes: number) => void;
 }): Promise<{ videoId: string }> {
   const { accountId, token, size, source, filename, onUploadProgress } = params;
-  const chunkSize = META_TRANSFER_CHUNK_SIZE;
+  const cap = META_TRANSFER_CHUNK_SIZE;
 
-  const { uploadSessionId, videoId } = await withRetry(() =>
-    startVideoUpload(accountId, token, size)
+  // Meta drives the resumable protocol: the start/transfer responses tell us the
+  // exact byte window (start_offset..end_offset) to send next. We honor that
+  // window — clamped to `cap` for memory/request-size safety — and advance
+  // strictly by Meta's returned offsets, so the stream position can never
+  // desync from what Meta expects (sending ≤ the window is always safe; Meta
+  // just returns an advanced start_offset).
+  let { uploadSessionId, videoId, startOffset, endOffset } = await withRetry(
+    () => startVideoUpload(accountId, token, size)
   );
-
-  let offset = 0;
-  let complete = false;
-  const sendChunk = async (bytes: Uint8Array): Promise<void> => {
-    // Copy into a fresh ArrayBuffer-backed view so it's a valid BlobPart
-    // regardless of the source stream's backing buffer type.
-    const buf = new Uint8Array(bytes.byteLength);
-    buf.set(bytes);
-    const res = await withRetry(() =>
-      transferVideoChunk(accountId, token, uploadSessionId, offset, new Blob([buf]))
-    );
-    offset = res.startOffset;
-    onUploadProgress?.(offset);
-    if (res.startOffset === res.endOffset) complete = true;
-  };
 
   const reader = source.getReader();
   let buffered: Uint8Array[] = [];
   let bufferedBytes = 0;
-  let done = false;
-  while (!done && !complete) {
-    const { value, done: streamDone } = await reader.read();
-    if (value && value.length) {
-      buffered.push(value);
-      bufferedBytes += value.length;
+  let streamDone = false;
+
+  while (startOffset < endOffset) {
+    const want = Math.min(endOffset - startOffset, cap);
+
+    // Fill the buffer until we hold `want` bytes (or the stream is exhausted).
+    while (bufferedBytes < want && !streamDone) {
+      const { value, done } = await reader.read();
+      if (value && value.length) {
+        buffered.push(value);
+        bufferedBytes += value.length;
+      }
+      streamDone = done;
     }
-    done = streamDone;
-    while (bufferedBytes >= chunkSize && !complete) {
-      const combined = concatChunks(buffered, bufferedBytes);
-      await sendChunk(combined.subarray(0, chunkSize));
-      const remainder = combined.subarray(chunkSize);
-      buffered = remainder.length ? [remainder] : [];
-      bufferedBytes = remainder.length;
-    }
-  }
-  // Flush the trailing partial chunk (unless Meta already signalled completion).
-  if (!complete && bufferedBytes > 0) {
-    await sendChunk(concatChunks(buffered, bufferedBytes));
+
+    const combined = concatChunks(buffered, bufferedBytes);
+    const sendLen = Math.min(want, combined.length);
+    if (sendLen === 0) break; // stream ended before Meta expected — stop cleanly
+
+    // Copy into a fresh ArrayBuffer-backed view so it's a valid BlobPart
+    // regardless of the source stream's backing buffer type.
+    const chunk = new Uint8Array(sendLen);
+    chunk.set(combined.subarray(0, sendLen));
+
+    const res = await withRetry(() =>
+      transferVideoChunk(
+        accountId,
+        token,
+        uploadSessionId,
+        startOffset,
+        new Blob([chunk])
+      )
+    );
+
+    // Consume exactly what we sent; keep the remainder buffered.
+    const remainder = combined.subarray(sendLen);
+    buffered = remainder.length ? [remainder] : [];
+    bufferedBytes = remainder.length;
+
+    startOffset = res.startOffset;
+    endOffset = res.endOffset;
+    onUploadProgress?.(startOffset);
   }
 
   await withRetry(() =>

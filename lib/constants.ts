@@ -26,13 +26,13 @@ export function isVideoMime(mime: string): boolean {
 export const VIDEO_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /**
- * Chunk size for the OUTBOUND server→Meta leg of the resumable video upload.
- * The 4.5MB Vercel body limit is inbound-only and does not apply here, so we
- * use a much larger chunk: fewer sequential POSTs to graph-video means far less
- * wall-clock on big files (a 2GB video is ~64 POSTs at 32MB instead of ~512 at
- * 4MB), which keeps large uploads inside the function's time budget.
+ * Upper CAP on the OUTBOUND server→Meta transfer chunk. Meta's resumable upload
+ * dictates the exact window to send via the start/transfer response offsets; we
+ * honor that window but never send more than this per POST. 4MB is the size the
+ * pre-streaming code used successfully — larger chunks (e.g. 32MB) are rejected
+ * by graph-video and break multi-chunk uploads.
  */
-export const META_TRANSFER_CHUNK_SIZE = 32 * 1024 * 1024;
+export const META_TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /** Max simultaneous uploads (avoid Meta rate limiting). */
 export const MAX_CONCURRENT_UPLOADS = 3;

@@ -351,7 +351,7 @@ export default function UploadUI() {
             );
             return;
           }
-          setTimeout(poll, 2000);
+          setTimeout(poll, 3000);
         };
         poll();
       }),

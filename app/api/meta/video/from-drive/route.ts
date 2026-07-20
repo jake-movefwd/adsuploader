@@ -54,6 +54,16 @@ export async function GET(req: NextRequest) {
           controller.close();
           return;
         }
+        if (!meta.size) {
+          // Meta's resumable upload sizes its transfer windows off file_size;
+          // starting with 0 breaks the session. Drive omits size for some items.
+          send({
+            type: "error",
+            error: "Could not determine the video's size from Drive",
+          });
+          controller.close();
+          return;
+        }
 
         // Stream the Drive body straight through to Meta — never buffered whole.
         const driveRes = await withRetry(() =>
