@@ -92,10 +92,22 @@ export async function fetchDriveFileResponse(
   )}?alt=media&supportsAllDrives=true`;
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (range) headers.Range = range;
-  const res = await fetch(url, {
-    headers,
-    signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS),
-  });
+  // Guard only the CONNECT phase (time to response headers). Do NOT use
+  // AbortSignal.timeout — it aborts the ENTIRE fetch including the streaming
+  // body, which guillotines any download longer than the timeout mid-stream.
+  // The timer is cleared the moment headers arrive; mid-stream stalls are
+  // handled by the caller's per-read stall guard instead.
+  const controller = new AbortController();
+  const connectTimer = setTimeout(
+    () => controller.abort(),
+    DRIVE_FETCH_TIMEOUT_MS
+  );
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: controller.signal });
+  } finally {
+    clearTimeout(connectTimer);
+  }
   if (!res.ok && res.status !== 206) {
     throw new DriveApiError(
       `Failed to download Drive file (${res.status})`,
