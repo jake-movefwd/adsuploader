@@ -35,12 +35,13 @@ export const VIDEO_CHUNK_SIZE = 4 * 1024 * 1024;
 export const META_TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /**
- * Max simultaneous uploads. Kept low: each concurrent Drive video holds a Google
- * Drive download open for the whole Meta upload, and Google throttles sustained
- * concurrent downloads — too many at once stalls the later ones until the Vercel
- * function is killed. 2 paces Drive egress while still overlapping work.
+ * Max simultaneous uploads. Serialized (1): running two chunked Meta upload
+ * sessions at once made Meta shed load (HTTP 429 / code 2 "temporarily
+ * unavailable") and killed near-complete uploads. One at a time keeps Meta
+ * seeing a single session, which — with retry-with-backoff — is the reliable
+ * combination. Trades batch wall-clock for reliability.
  */
-export const MAX_CONCURRENT_UPLOADS = 2;
+export const MAX_CONCURRENT_UPLOADS = 1;
 
 /**
  * Per-request timeout for outbound Meta Graph calls. Without it, a hung POST

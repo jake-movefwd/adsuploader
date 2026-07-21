@@ -19,17 +19,31 @@ export class MetaApiError extends Error {
     message: string,
     readonly status: number,
     /** Meta Graph API error code (e.g. 4 = app rate limit), when present. */
-    readonly code?: number
+    readonly code?: number,
+    /** Backoff hinted by a Retry-After header, in ms, when present. */
+    readonly retryAfterMs?: number
   ) {
     super(message);
     this.name = "MetaApiError";
   }
 }
 
+/** Parses a Retry-After header (delta-seconds or HTTP date) into ms. */
+function parseRetryAfter(res: Response): number | undefined {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const when = Date.parse(raw);
+  if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  return undefined;
+}
+
 /** Extracts a human-readable message from a Meta error response body. */
 async function readError(res: Response): Promise<never> {
   let message = `Meta API request failed (${res.status})`;
   let code: number | undefined;
+  const retryAfterMs = parseRetryAfter(res);
   try {
     const body = await res.json();
     if (body?.error?.message) {
@@ -41,7 +55,7 @@ async function readError(res: Response): Promise<never> {
   } catch {
     // non-JSON error body; keep the generic message
   }
-  throw new MetaApiError(message, res.status, code);
+  throw new MetaApiError(message, res.status, code, retryAfterMs);
 }
 
 export interface AdAccount {
@@ -243,17 +257,18 @@ export async function getVideoStatus(
 }
 
 /**
- * Retries `fn` on transient failures (network blips, Meta/Drive 5xx, 429) with
- * exponential backoff. 4xx (bad request, auth, not-a-video) are NOT retried —
- * they won't succeed on a second try. Used to keep a single hiccup on a long
- * multi-chunk upload from aborting the whole transfer.
+ * Retries `fn` on transient failures (network blips, timeouts, Meta 5xx / 429 /
+ * "temporarily unavailable") with exponential backoff, honoring a Retry-After
+ * hint when Meta provides one. Hard rate limits and 4xx client mistakes are NOT
+ * retried. Keeps a single hiccup on a long multi-chunk upload from aborting the
+ * whole transfer — re-sending a chunk at the same offset is idempotent.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
   opts?: { attempts?: number; baseDelayMs?: number }
 ): Promise<T> {
-  const attempts = opts?.attempts ?? 3;
-  const baseDelayMs = opts?.baseDelayMs ?? 1000;
+  const attempts = opts?.attempts ?? 4;
+  const baseDelayMs = opts?.baseDelayMs ?? 2000;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -261,24 +276,35 @@ export async function withRetry<T>(
     } catch (err) {
       lastErr = err;
       if (i === attempts - 1 || !isRetriableError(err)) throw err;
-      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** i));
+      const backoff = baseDelayMs * 2 ** i;
+      const hinted = (err as { retryAfterMs?: number } | null)?.retryAfterMs;
+      const delay = Math.max(backoff, hinted ?? 0);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr;
 }
 
-/** Meta rate-limit error codes — retrying these makes throttling worse. */
+/**
+ * Meta HARD rate-limit codes — a longer cooldown is needed, not rapid retry, so
+ * we surface these as failures rather than hammering. (Code 2 is a transient
+ * "service temporarily unavailable" and is intentionally NOT in this set.)
+ */
 const META_RATE_LIMIT_CODES = new Set([4, 17, 32, 613]);
 
-/** Retriable = a genuine transient failure, not a client mistake or throttle. */
+/** Retriable = a genuine transient failure, not a client mistake or hard limit. */
 function isRetriableError(err: unknown): boolean {
-  // Never retry a rate limit — backing off harder means NOT hammering it.
   if (err instanceof MetaApiError && err.code !== undefined) {
+    // Hard app/user rate limits: don't retry (would worsen the throttle).
     if (META_RATE_LIMIT_CODES.has(err.code)) return false;
+    // Code 2 = "temporarily unavailable" — Meta explicitly wants a retry.
+    if (err.code === 2) return true;
   }
   const status = (err as { status?: number } | null)?.status;
   if (typeof status === "number") {
-    if (status === 429) return false; // rate limited — do not retry
+    // 429 here is a generic transient throttle (hard limits handled above by
+    // code) — back off and retry. 5xx are transient server errors.
+    if (status === 429) return true;
     return status >= 500;
   }
   // AbortSignal.timeout fires a DOMException (TimeoutError/AbortError) — the
