@@ -94,6 +94,7 @@ export async function GET(req: NextRequest) {
         send({ type: "uploaded", assetId: videoId, filename: meta.name });
         controller.close();
       } catch (err) {
+        console.error("[video-upload] from-drive route error:", err);
         const message =
           err instanceof Error ? err.message : "Drive video upload failed";
         send({ type: "error", error: message });

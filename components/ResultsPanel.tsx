@@ -20,15 +20,21 @@ export default function ResultsPanel({
   items,
   states,
   onNewBatch,
+  onRetryFailed,
 }: {
   items: SelectedItem[];
   states: Record<string, UploadState>;
   onNewBatch: () => void;
+  onRetryFailed?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
   const successCount = items.filter(
     (i) => states[i.id]?.status === "success"
+  ).length;
+
+  const failedCount = items.filter(
+    (i) => states[i.id]?.status === "error"
   ).length;
 
   const hasVideo = useMemo(
@@ -123,12 +129,22 @@ export default function ResultsPanel({
     <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-slate-900">Results</h2>
-        <button
-          onClick={onNewBatch}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-50"
-        >
-          New batch
-        </button>
+        <div className="flex items-center gap-2">
+          {failedCount > 0 && onRetryFailed && (
+            <button
+              onClick={onRetryFailed}
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-blue-500"
+            >
+              Retry failed ({failedCount})
+            </button>
+          )}
+          <button
+            onClick={onNewBatch}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-50"
+          >
+            New batch
+          </button>
+        </div>
       </div>
 
       <p className="mt-2 text-sm text-slate-600">

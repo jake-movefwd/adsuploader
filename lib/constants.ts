@@ -34,8 +34,28 @@ export const VIDEO_CHUNK_SIZE = 4 * 1024 * 1024;
  */
 export const META_TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
 
-/** Max simultaneous uploads (avoid Meta rate limiting). */
-export const MAX_CONCURRENT_UPLOADS = 3;
+/**
+ * Max simultaneous uploads. Kept low: each concurrent Drive video holds a Google
+ * Drive download open for the whole Meta upload, and Google throttles sustained
+ * concurrent downloads — too many at once stalls the later ones until the Vercel
+ * function is killed. 2 paces Drive egress while still overlapping work.
+ */
+export const MAX_CONCURRENT_UPLOADS = 2;
+
+/**
+ * Per-request timeout for outbound Meta Graph calls. Without it, a hung POST
+ * rides all the way to the 300s function kill (a silent, undiagnosable drop);
+ * with it the request aborts and `withRetry` can retry the transient stall.
+ */
+export const META_FETCH_TIMEOUT_MS = 60_000;
+
+/**
+ * Timeout to open the Drive download response, and the max gap between stream
+ * reads once flowing. A stalled Drive read (Google throttling) trips this and
+ * fails fast with a clear, retryable error instead of hanging to the 300s kill.
+ */
+export const DRIVE_FETCH_TIMEOUT_MS = 60_000;
+export const DRIVE_READ_STALL_MS = 60_000;
 
 /**
  * The aspect ratios every uploaded image is cropped into. `ratio` is width/height

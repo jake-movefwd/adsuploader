@@ -480,25 +480,45 @@ export default function UploadUI() {
 
   // ---- batch runner (concurrency capped at MAX_CONCURRENT_UPLOADS) ----------
 
+  // Runs a set of items through the concurrency-capped worker pool.
+  const runBatch = useCallback(
+    async (list: SelectedItem[], acct: string) => {
+      const queue = [...list];
+      const worker = async () => {
+        while (queue.length) {
+          const item = queue.shift();
+          if (item) await uploadOne(item, acct);
+        }
+      };
+      await Promise.allSettled(
+        Array.from({ length: Math.min(MAX_CONCURRENT_UPLOADS, list.length) }, () =>
+          worker()
+        )
+      );
+    },
+    [uploadOne]
+  );
+
   const startUpload = useCallback(async () => {
     if (!accountId || items.length === 0) return;
     setPhase("uploading");
-
-    const queue = [...items];
-    const worker = async () => {
-      while (queue.length) {
-        const item = queue.shift();
-        if (item) await uploadOne(item, accountId);
-      }
-    };
-    await Promise.allSettled(
-      Array.from({ length: Math.min(MAX_CONCURRENT_UPLOADS, items.length) }, () =>
-        worker()
-      )
-    );
-
+    await runBatch(items, accountId);
     setPhase("done");
-  }, [accountId, items, uploadOne]);
+  }, [accountId, items, runBatch]);
+
+  // Re-run only the items that errored, without rebuilding the batch. Thumbnails
+  // and transcript Docs are still in state, so nothing needs re-selecting.
+  const retryFailed = useCallback(async () => {
+    if (!accountId) return;
+    const failed = items.filter((i) => states[i.id]?.status === "error");
+    if (failed.length === 0) return;
+    setPhase("uploading");
+    failed.forEach((i) =>
+      update(i.id, { status: "pending", progress: 0, error: undefined })
+    );
+    await runBatch(failed, accountId);
+    setPhase("done");
+  }, [accountId, items, states, update, runBatch]);
 
   // Every video must have a thumbnail chosen before the batch can upload.
   const videosNeedThumbnails = useMemo(
@@ -568,7 +588,12 @@ export default function UploadUI() {
       />
 
       {phase === "done" && (
-        <ResultsPanel items={items} states={states} onNewBatch={newBatch} />
+        <ResultsPanel
+          items={items}
+          states={states}
+          onNewBatch={newBatch}
+          onRetryFailed={retryFailed}
+        />
       )}
 
       {pendingCrops.length > 0 && (

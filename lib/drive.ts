@@ -3,6 +3,8 @@
  * browser) using the Google access token from the encrypted JWT.
  */
 
+import { DRIVE_FETCH_TIMEOUT_MS } from "@/lib/constants";
+
 export class DriveApiError extends Error {
   constructor(
     message: string,
@@ -90,7 +92,10 @@ export async function fetchDriveFileResponse(
   )}?alt=media&supportsAllDrives=true`;
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (range) headers.Range = range;
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS),
+  });
   if (!res.ok && res.status !== 206) {
     throw new DriveApiError(
       `Failed to download Drive file (${res.status})`,

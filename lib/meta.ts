@@ -3,7 +3,11 @@
  * Facebook access token explicitly — tokens must never reach the browser.
  */
 
-import { META_TRANSFER_CHUNK_SIZE } from "@/lib/constants";
+import {
+  META_TRANSFER_CHUNK_SIZE,
+  META_FETCH_TIMEOUT_MS,
+  DRIVE_READ_STALL_MS,
+} from "@/lib/constants";
 
 const API_VERSION = process.env.META_GRAPH_API_VERSION || "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${API_VERSION}`;
@@ -132,6 +136,7 @@ export async function startVideoUpload(
   const res = await fetch(`${GRAPH_VIDEO_BASE}/${accountId}/advideos`, {
     method: "POST",
     body: form,
+    signal: AbortSignal.timeout(META_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) await readError(res);
 
@@ -170,6 +175,7 @@ export async function transferVideoChunk(
   const res = await fetch(`${GRAPH_VIDEO_BASE}/${accountId}/advideos`, {
     method: "POST",
     body: form,
+    signal: AbortSignal.timeout(META_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) await readError(res);
 
@@ -201,6 +207,7 @@ export async function finishVideoUpload(
   const res = await fetch(`${GRAPH_VIDEO_BASE}/${accountId}/advideos`, {
     method: "POST",
     body: form,
+    signal: AbortSignal.timeout(META_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) await readError(res);
 }
@@ -219,7 +226,9 @@ export async function getVideoStatus(
   const url = `${GRAPH_BASE}/${videoId}?fields=status&access_token=${encodeURIComponent(
     token
   )}`;
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(META_FETCH_TIMEOUT_MS),
+  });
   if (!res.ok) await readError(res);
 
   const body = await res.json();
@@ -272,6 +281,10 @@ function isRetriableError(err: unknown): boolean {
     if (status === 429) return false; // rate limited — do not retry
     return status >= 500;
   }
+  // AbortSignal.timeout fires a DOMException (TimeoutError/AbortError) — the
+  // request stalled and never completed, so a retry is worth a shot.
+  const name = (err as { name?: string } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") return true;
   // A thrown TypeError from fetch() means the request never completed (DNS,
   // connection reset, TLS) — safe to retry.
   return err instanceof TypeError;
@@ -287,6 +300,30 @@ function concatChunks(parts: Uint8Array[], total: number): Uint8Array {
     pos += part.length;
   }
   return out;
+}
+
+/**
+ * Reads the next stream chunk but rejects if no bytes arrive within `timeoutMs`.
+ * A stalled Google Drive download (throttling) would otherwise hang until the
+ * Vercel function is killed at maxDuration — a silent, undiagnosable drop. This
+ * turns it into a fast, clear error the caller can surface and the user retry.
+ */
+async function readWithStallGuard(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("Video download stalled — please retry")),
+      timeoutMs
+    );
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -309,6 +346,10 @@ export async function uploadVideoFromStream(params: {
 }): Promise<{ videoId: string }> {
   const { accountId, token, size, source, filename, onUploadProgress } = params;
   const cap = META_TRANSFER_CHUNK_SIZE;
+  const startedAt = Date.now();
+  const label = `${filename ?? "video"} (${size}B)`;
+  const elapsed = () => `+${Date.now() - startedAt}ms`;
+  console.log(`[video-upload] start ${label} acct=${accountId}`);
 
   // Meta drives the resumable protocol: the start/transfer responses tell us the
   // exact byte window (start_offset..end_offset) to send next. We honor that
@@ -319,56 +360,76 @@ export async function uploadVideoFromStream(params: {
   let { uploadSessionId, videoId, startOffset, endOffset } = await withRetry(
     () => startVideoUpload(accountId, token, size)
   );
+  console.log(`[video-upload] session ${label} video=${videoId} ${elapsed()}`);
 
   const reader = source.getReader();
   let buffered: Uint8Array[] = [];
   let bufferedBytes = 0;
   let streamDone = false;
 
-  while (startOffset < endOffset) {
-    const want = Math.min(endOffset - startOffset, cap);
+  try {
+    while (startOffset < endOffset) {
+      const want = Math.min(endOffset - startOffset, cap);
 
-    // Fill the buffer until we hold `want` bytes (or the stream is exhausted).
-    while (bufferedBytes < want && !streamDone) {
-      const { value, done } = await reader.read();
-      if (value && value.length) {
-        buffered.push(value);
-        bufferedBytes += value.length;
+      // Fill the buffer until we hold `want` bytes (or the stream is exhausted).
+      // The stall guard converts a throttled/hung Drive read into a clear error.
+      while (bufferedBytes < want && !streamDone) {
+        const { value, done } = await readWithStallGuard(
+          reader,
+          DRIVE_READ_STALL_MS
+        );
+        if (value && value.length) {
+          buffered.push(value);
+          bufferedBytes += value.length;
+        }
+        streamDone = done;
       }
-      streamDone = done;
+
+      const combined = concatChunks(buffered, bufferedBytes);
+      const sendLen = Math.min(want, combined.length);
+      if (sendLen === 0) break; // stream ended before Meta expected — stop cleanly
+
+      // Copy into a fresh ArrayBuffer-backed view so it's a valid BlobPart
+      // regardless of the source stream's backing buffer type.
+      const chunk = new Uint8Array(sendLen);
+      chunk.set(combined.subarray(0, sendLen));
+
+      const res = await withRetry(() =>
+        transferVideoChunk(
+          accountId,
+          token,
+          uploadSessionId,
+          startOffset,
+          new Blob([chunk])
+        )
+      );
+
+      // Consume exactly what we sent; keep the remainder buffered.
+      const remainder = combined.subarray(sendLen);
+      buffered = remainder.length ? [remainder] : [];
+      bufferedBytes = remainder.length;
+
+      startOffset = res.startOffset;
+      endOffset = res.endOffset;
+      onUploadProgress?.(startOffset);
     }
-
-    const combined = concatChunks(buffered, bufferedBytes);
-    const sendLen = Math.min(want, combined.length);
-    if (sendLen === 0) break; // stream ended before Meta expected — stop cleanly
-
-    // Copy into a fresh ArrayBuffer-backed view so it's a valid BlobPart
-    // regardless of the source stream's backing buffer type.
-    const chunk = new Uint8Array(sendLen);
-    chunk.set(combined.subarray(0, sendLen));
-
-    const res = await withRetry(() =>
-      transferVideoChunk(
-        accountId,
-        token,
-        uploadSessionId,
-        startOffset,
-        new Blob([chunk])
-      )
+  } catch (err) {
+    // Release the (possibly stalled) source connection so it can't linger.
+    await reader.cancel().catch(() => {});
+    console.error(
+      `[video-upload] transfer failed ${label} at offset ${startOffset} ${elapsed()}:`,
+      err
     );
-
-    // Consume exactly what we sent; keep the remainder buffered.
-    const remainder = combined.subarray(sendLen);
-    buffered = remainder.length ? [remainder] : [];
-    bufferedBytes = remainder.length;
-
-    startOffset = res.startOffset;
-    endOffset = res.endOffset;
-    onUploadProgress?.(startOffset);
+    throw err;
   }
+
+  console.log(
+    `[video-upload] transferred ${label} bytes=${startOffset} ${elapsed()}`
+  );
 
   await withRetry(() =>
     finishVideoUpload(accountId, token, uploadSessionId, filename)
   );
+  console.log(`[video-upload] finished ${label} video=${videoId} ${elapsed()}`);
   return { videoId };
 }
